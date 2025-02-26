@@ -39,7 +39,7 @@
                         <div class="flex items-center space-x-4">
                             <span class="text-gray-700">{{ current_user.username }}</span>
                             <div class="relative">
-                                <button onclick="toggleDropdown()" class="flex items-center space-x-2 text-gray-700 hover:text-gray-900">
+                                <button type="button" id="dropdownButton" class="flex items-center space-x-2 text-gray-700 hover:text-gray-900">
                                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
                                     </svg>
@@ -127,32 +127,38 @@
             return quantity.toLocaleString() + ' MT';
         }
 
-        // UI functions
-        function toggleDropdown() {
+        // Initialize dropdown menu functionality
+        document.addEventListener('DOMContentLoaded', function() {
+            const dropdownButton = document.getElementById('dropdownButton');
             const dropdown = document.getElementById('userDropdown');
-            dropdown.classList.toggle('hidden');
-        }
-
-        // Close dropdown when clicking outside
-        window.onclick = function(event) {
-            if (!event.target.matches('button') && !event.target.matches('svg') && !event.target.matches('path')) {
-                const dropdown = document.getElementById('userDropdown');
-                if (!dropdown.classList.contains('hidden')) {
-                    dropdown.classList.add('hidden');
-                }
+            
+            if (dropdownButton && dropdown) {
+                // Toggle dropdown when button is clicked
+                dropdownButton.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    dropdown.classList.toggle('hidden');
+                });
+                
+                // Close dropdown when clicking elsewhere
+                document.addEventListener('click', function(e) {
+                    if (!dropdown.contains(e.target) && !dropdownButton.contains(e.target)) {
+                        dropdown.classList.add('hidden');
+                    }
+                });
+                
+                // Prevent dropdown links from immediately closing dropdown
+                dropdown.addEventListener('click', function(e) {
+                    // Allow normal link behavior but stop propagation to parent click handlers
+                    e.stopPropagation();
+                });
             }
-        }
+        });
 
         // Error handling
         function showError(message) {
             // You can implement your own error display logic here
             console.error(message);
         }
-
-        // Initialize tooltips, modals, or other UI components
-        document.addEventListener('DOMContentLoaded', function() {
-            // Add any initialization code here
-        });
     </script>
 
     <!-- Page-specific scripts -->

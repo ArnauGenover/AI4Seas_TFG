@@ -46,6 +46,7 @@ class Session(Base):
     expires = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_activity = Column(DateTime, default=datetime.utcnow)
+    server_id = Column(String, nullable=True)  # Add server_id column
     
     # This will be defined after the User class is defined
     user = None
@@ -75,6 +76,23 @@ class User(Base):
     auctions = relationship("Auction", back_populates="owner")
     processed_emails = relationship("ProcessedEmail", back_populates="user")
     sessions = relationship("Session", back_populates="user", cascade="all, delete-orphan")
+
+    # Notification settings
+    notify_matches = Column(Boolean, default=True)
+    notify_auctions = Column(Boolean, default=True)
+    notify_bids = Column(Boolean, default=True)
+    digest_frequency = Column(String, default="realtime")  # realtime, daily, weekly
+    
+    # Display settings
+    show_ais_data = Column(Boolean, default=True)
+    show_vessel_history = Column(Boolean, default=True)
+    default_latitude = Column(Float, default=0)
+    default_longitude = Column(Float, default=0)
+    default_zoom = Column(Integer, default=3)
+    date_format = Column(String, default="iso")  # iso, us, eu
+    
+    # API access
+    api_key = Column(String, nullable=True, unique=True)
 
     def verify_password(self, plain_password: str) -> bool:
         return pwd_context.verify(plain_password, self.hashed_password)

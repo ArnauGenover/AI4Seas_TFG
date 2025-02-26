@@ -23,6 +23,14 @@ templates = Jinja2Templates(directory="src/ship_broker/web/templates")
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = "HS256"
 
+# Import SERVER_ID from main
+try:
+    from ...main import SERVER_ID
+except ImportError:
+    # If not available yet, create a placeholder
+    SERVER_ID = None
+    logger.warning("SERVER_ID not available during auth module import")
+
 # Dependency to get current user
 async def get_current_user(request: Request, db: Session = Depends(get_db)):
     token = request.cookies.get("session")
@@ -45,6 +53,13 @@ async def get_current_user(request: Request, db: Session = Depends(get_db)):
             db_session = db.query(DbSession).filter(DbSession.id == token).first()
             
             if not db_session:
+                return None
+            
+            # Check server ID if available
+            if hasattr(db_session, 'server_id') and SERVER_ID and db_session.server_id != SERVER_ID:
+                logger.info(f"Session {token} is from a different server instance. Invalidating.")
+                db.delete(db_session)
+                db.commit()
                 return None
                 
             if db_session.expires < datetime.utcnow():
@@ -113,7 +128,8 @@ async def get_user_sessions(
                 "id": session.id,
                 "created_at": session.created_at,
                 "expires": session.expires,
-                "last_activity": session.last_activity
+                "last_activity": session.last_activity,
+                "server_id": getattr(session, "server_id", None)
             } for session in sessions
         ]
     }

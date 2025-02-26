@@ -10,27 +10,63 @@
             </h2>
         </div>
         <form class="mt-8 space-y-6" action="/register" method="POST" enctype="application/x-www-form-urlencoded">
-            <div class="rounded-md shadow-sm -space-y-px">
+            <div class="space-y-4">
                 <div>
-                    <label for="username" class="sr-only">Username</label>
+                    <label for="username" class="block text-gray-700 text-sm font-bold mb-2">Username</label>
                     <input id="username" name="username" type="text" required 
-                           class="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm" 
-                           placeholder="Username">
+                           class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm" 
+                           placeholder="Choose a username">
                 </div>
+                
                 <div>
-                    <label for="email" class="sr-only">Email address</label>
+                    <label for="email" class="block text-gray-700 text-sm font-bold mb-2">Email address</label>
                     <input id="email" name="email" type="email" required 
-                           class="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm" 
-                           placeholder="Email address">
+                           class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm" 
+                           placeholder="Your email address">
                 </div>
+                
                 <div>
-                    <label for="password" class="sr-only">Password</label>
+                    <label for="email_confirm" class="block text-gray-700 text-sm font-bold mb-2">
+                        Confirm Email
+                    </label>
+                    <input class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm" 
+                           id="email_confirm" name="email_confirm" type="email" required 
+                           placeholder="Re-enter your email address">
+                    <div id="email-match" class="mt-1"></div>
+                </div>
+                
+                <div>
+                    <label for="password" class="block text-gray-700 text-sm font-bold mb-2">Password</label>
                     <input id="password" name="password" type="password" required 
-                           class="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-b-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm" 
-                           placeholder="Password">
+                           class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm" 
+                           placeholder="Create a password">
+                    <div id="password-errors" class="mt-1 text-sm"></div>
+                </div>
+                
+                <div>
+                    <label for="password_confirm" class="block text-gray-700 text-sm font-bold mb-2">
+                        Confirm Password
+                    </label>
+                    <input class="appearance-none rounded relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-blue-500 focus:border-blue-500 focus:z-10 sm:text-sm" 
+                           id="password_confirm" name="password_confirm" type="password" required
+                           placeholder="Re-enter your password">
+                    <div id="password-match" class="mt-1"></div>
                 </div>
             </div>
 
+            <!-- Password requirements hint -->
+            <div class="mb-4 text-sm text-gray-600 border border-gray-200 p-3 rounded bg-gray-50">
+                <p class="font-medium mb-1">Password must contain at least:</p>
+                <ul class="list-disc pl-5">
+                    <li>8 characters</li>
+                    <li>One letter</li>
+                    <li>One number</li>
+                    <li>One special character (e.g., !, @, #, $, etc.)</li>
+                </ul>
+            </div>
+
+            <div id="form-errors" class="text-red-500 mb-4"></div>
+            
             {% if error %}
             <div class="text-red-500 text-sm text-center">
                 {{ error }}
@@ -54,4 +90,115 @@
         </form>
     </div>
 </div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const passwordInput = document.getElementById('password');
+    const confirmPasswordInput = document.getElementById('password_confirm');
+    const emailInput = document.getElementById('email');
+    const confirmEmailInput = document.getElementById('email_confirm');
+    const form = document.querySelector('form');
+    
+    // Function to validate password strength
+    function validatePassword() {
+      const password = passwordInput.value;
+      const errors = [];
+      
+      if (password.length < 8) {
+        errors.push('Password must be at least 8 characters long');
+      }
+      
+      if (!/[a-zA-Z]/.test(password)) {
+        errors.push('Password must contain at least one letter');
+      }
+      
+      if (!/[0-9]/.test(password)) {
+        errors.push('Password must contain at least one number');
+      }
+      
+      if (!/[!@#$%^&*(),.?":{}|<>]/.test(password)) {
+        errors.push('Password must contain at least one special character');
+      }
+      
+      return errors;
+    }
+    
+    // Add event listener for password input
+    passwordInput.addEventListener('input', function() {
+      const errors = validatePassword();
+      const errorElement = document.getElementById('password-errors');
+      
+      if (errorElement) {
+        if (errors.length > 0) {
+          errorElement.innerHTML = errors.map(error => `<li class="text-red-500">${error}</li>`).join('');
+          errorElement.style.display = 'block';
+        } else {
+          errorElement.innerHTML = '<li class="text-green-500">✓ Password meets all requirements</li>';
+        }
+      }
+    });
+    
+    // Validate passwords match on input
+    confirmPasswordInput.addEventListener('input', function() {
+      const passwordMatch = document.getElementById('password-match');
+      if (passwordMatch) {
+        if (passwordInput.value !== confirmPasswordInput.value) {
+          passwordMatch.textContent = '✗ Passwords do not match';
+          passwordMatch.className = 'text-red-500 text-sm mt-1';
+        } else {
+          passwordMatch.textContent = '✓ Passwords match';
+          passwordMatch.className = 'text-green-500 text-sm mt-1';
+        }
+      }
+    });
+    
+    // Validate emails match on input
+    confirmEmailInput.addEventListener('input', function() {
+      const emailMatch = document.getElementById('email-match');
+      if (emailMatch) {
+        if (emailInput.value !== confirmEmailInput.value) {
+          emailMatch.textContent = '✗ Email addresses do not match';
+          emailMatch.className = 'text-red-500 text-sm mt-1';
+        } else {
+          emailMatch.textContent = '✓ Email addresses match';
+          emailMatch.className = 'text-green-500 text-sm mt-1';
+        }
+      }
+    });
+    
+    // Form submission validation
+    form.addEventListener('submit', function(event) {
+      // Clear any existing error messages
+      const errorContainer = document.getElementById('form-errors');
+      if (errorContainer) {
+        errorContainer.textContent = '';
+      }
+      
+      const errors = [];
+      
+      // Check email match
+      if (emailInput.value !== confirmEmailInput.value) {
+        errors.push('Email addresses do not match');
+      }
+      
+      // Check password match
+      if (passwordInput.value !== confirmPasswordInput.value) {
+        errors.push('Passwords do not match');
+      }
+      
+      // Check password strength
+      const passwordErrors = validatePassword();
+      errors.push(...passwordErrors);
+      
+      // If there are errors, prevent form submission
+      if (errors.length > 0) {
+        event.preventDefault();
+        if (errorContainer) {
+          errorContainer.textContent = errors.join('. ');
+          errorContainer.className = 'text-red-500 mb-4 p-3 border border-red-300 rounded bg-red-50';
+        }
+      }
+    });
+  });
+</script>
 {% endblock %}

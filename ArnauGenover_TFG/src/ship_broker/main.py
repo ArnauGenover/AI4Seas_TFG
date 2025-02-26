@@ -6,11 +6,16 @@ import jwt
 import asyncio
 import logging
 import imaplib
+import secrets
+import signal
+import sys
+import re
+
 from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import (
-    FastAPI, Request, Depends, Form, status, Cookie
+    FastAPI, Request, Depends, Form, status, Cookie, HTTPException
 )
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +32,6 @@ from .core.email_service import generate_verification_code, send_verification_em
 from .api.routes import (
     vessels, cargoes, email_processing, test, matching, auctions, auth
 )
-from .api.routes.auth import get_current_user
 from .api.dependencies import get_db
 
 # Configure logging
@@ -37,6 +41,10 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Generate a unique server ID for this server instance
+SERVER_ID = str(uuid.uuid4())
+logger.info(f"Server started with ID: {SERVER_ID}")
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -88,6 +96,60 @@ if not os.path.exists(templates_dir):
     logger.info(f"Created templates directory: {templates_dir}")
 
 templates = Jinja2Templates(directory=templates_dir)
+
+# Custom dependency to get current user with server ID check
+async def get_current_user_with_server_check(
+    request: Request, 
+    session: Optional[str] = Cookie(None),
+    db: Session = Depends(get_db)
+):
+    """Get current user with server ID check"""
+    if not session:
+        return None
+    
+    try:
+        # First try JWT token (for backward compatibility)
+        payload = jwt.decode(session, settings.SECRET_KEY, algorithms=["HS256"])
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            return user
+    except jwt.PyJWTError:
+        # If JWT decoding fails, try persistent session
+        try:
+            db_session = db.query(DbSession).filter(DbSession.id == session).first()
+            
+            if not db_session:
+                return None
+                
+            # Check if session has a server_id and if it matches current server
+            if hasattr(db_session, 'server_id') and db_session.server_id != SERVER_ID:
+                logger.info(f"Session {session} is from a different server instance. Invalidating.")
+                db.delete(db_session)
+                db.commit()
+                return None
+                
+            if db_session.expires < datetime.utcnow():
+                # Session expired, clean up
+                db.delete(db_session)
+                db.commit()
+                logger.info(f"Expired session removed: {session}")
+                return None
+            
+            # Update last activity
+            db_session.last_activity = datetime.utcnow()
+            db.commit()
+            
+            return db_session.user
+        except Exception as e:
+            logger.error(f"Error retrieving session: {str(e)}")
+            return None
+    except Exception as e:
+        logger.error(f"Error in authentication: {str(e)}")
+        return None
 
 # Include API routers with consistent prefixes
 app.include_router(
@@ -154,11 +216,24 @@ async def shutdown_event():
     try:
         # Stop AIS stream
         await tracker.stop_tracking()
+        
+        # Clear all active sessions
+        db = SessionLocal()
+        try:
+            # Delete all active sessions to force logout
+            deleted_count = db.query(DbSession).delete()
+            db.commit()
+            logger.info(f"Cleared {deleted_count} active sessions during shutdown")
+        except Exception as e:
+            logger.error(f"Error clearing sessions during shutdown: {str(e)}")
+            db.rollback()
+        finally:
+            db.close()
     except Exception as e:
         logger.error(f"Error during shutdown: {str(e)}")
 
 @app.get("/")
-async def home(request: Request, current_user=Depends(get_current_user)):
+async def home(request: Request, current_user=Depends(get_current_user_with_server_check)):
     """Render home page"""
     try:
         return templates.TemplateResponse("index.html", {
@@ -170,7 +245,7 @@ async def home(request: Request, current_user=Depends(get_current_user)):
         return {"error": "Error rendering page"}
 
 @app.get("/vessels")
-async def vessels_page(request: Request, current_user=Depends(get_current_user)):
+async def vessels_page(request: Request, current_user=Depends(get_current_user_with_server_check)):
     """Render vessels page"""
     try:
         return templates.TemplateResponse("vessels.html", {
@@ -182,7 +257,7 @@ async def vessels_page(request: Request, current_user=Depends(get_current_user))
         return {"error": "Error rendering page"}
 
 @app.get("/cargoes")
-async def cargoes_page(request: Request, current_user=Depends(get_current_user)):
+async def cargoes_page(request: Request, current_user=Depends(get_current_user_with_server_check)):
     """Render cargoes page"""
     try:
         return templates.TemplateResponse("cargoes.html", {
@@ -194,7 +269,7 @@ async def cargoes_page(request: Request, current_user=Depends(get_current_user))
         return {"error": "Error rendering page"}
 
 @app.get("/auctions")
-async def auctions_page(request: Request, current_user=Depends(get_current_user)):
+async def auctions_page(request: Request, current_user=Depends(get_current_user_with_server_check)):
     """Render auctions page"""
     try:
         return templates.TemplateResponse("auctions.html", {
@@ -213,7 +288,8 @@ async def health_check():
             "status": "healthy",
             "version": settings.VERSION,
             "database": "connected" if engine else "disconnected",
-            "ais_stream": "connected" if tracker.api_key else "disconnected"
+            "ais_stream": "connected" if tracker.api_key else "disconnected",
+            "server_id": SERVER_ID
         }
     except Exception as e:
         logger.error(f"Error in health check: {str(e)}")
@@ -277,11 +353,23 @@ async def login_form(
         session_id = str(uuid.uuid4())
         expires = datetime.utcnow() + timedelta(days=session_duration)
         
-        db_session = DbSession(
-            id=session_id,
-            user_id=user.id,
-            expires=expires
-        )
+        try:
+            # Add server_id to session
+            db_session = DbSession(
+                id=session_id,
+                user_id=user.id,
+                expires=expires,
+                server_id=SERVER_ID  # Store the current server ID
+            )
+        except Exception as e:
+            # If server_id column doesn't exist yet, create session without it
+            logger.warning(f"Could not add server_id to session: {str(e)}")
+            db_session = DbSession(
+                id=session_id,
+                user_id=user.id,
+                expires=expires
+            )
+            
         db.add(db_session)
         db.commit()
         
@@ -318,16 +406,61 @@ async def register_page(request: Request):
         return {"error": "Error rendering page"}
 
 
+
 @app.post("/register")
 async def register_form(
     request: Request,
     username: str = Form(...),
     email: str = Form(...),
+    email_confirm: str = Form(...),
     password: str = Form(...),
+    password_confirm: str = Form(...),
     db: Session = Depends(get_db)
 ):
     """Process registration form submission"""
     try:
+        # Validate email confirmation
+        if email != email_confirm:
+            return templates.TemplateResponse(
+                "register.html",
+                {"request": request, "error": "Email addresses do not match", "current_user": None}
+            )
+            
+        # Validate password confirmation
+        if password != password_confirm:
+            return templates.TemplateResponse(
+                "register.html",
+                {"request": request, "error": "Passwords do not match", "current_user": None}
+            )
+        
+        # Validate password strength
+        if len(password) < 8:
+            return templates.TemplateResponse(
+                "register.html",
+                {"request": request, "error": "Password must be at least 8 characters long", "current_user": None}
+            )
+            
+        # Check for at least one letter
+        if not re.search(r'[a-zA-Z]', password):
+            return templates.TemplateResponse(
+                "register.html",
+                {"request": request, "error": "Password must contain at least one letter", "current_user": None}
+            )
+            
+        # Check for at least one number
+        if not re.search(r'[0-9]', password):
+            return templates.TemplateResponse(
+                "register.html",
+                {"request": request, "error": "Password must contain at least one number", "current_user": None}
+            )
+            
+        # Check for at least one special character
+        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+            return templates.TemplateResponse(
+                "register.html",
+                {"request": request, "error": "Password must contain at least one special character", "current_user": None}
+            )
+        
         # Check for existing email
         existing_email = db.query(User).filter(User.email == email).first()
         # Check for existing username
@@ -425,18 +558,34 @@ async def verify_email(
         user.verification_code = None
         db.commit()
         
-        # Create a JWT token for the user
-        token = jwt.encode(
-            {"sub": str(user.id), "exp": datetime.utcnow() + timedelta(hours=24)},
-            settings.SECRET_KEY,
-            algorithm="HS256"
-        )
+        # Create a session with server ID
+        session_id = str(uuid.uuid4())
+        expires = datetime.utcnow() + timedelta(days=1)  # 1 day by default
+        
+        try:
+            db_session = DbSession(
+                id=session_id,
+                user_id=user.id,
+                expires=expires,
+                server_id=SERVER_ID
+            )
+        except Exception as e:
+            # If server_id column doesn't exist yet, create session without it
+            logger.warning(f"Could not add server_id to session: {str(e)}")
+            db_session = DbSession(
+                id=session_id,
+                user_id=user.id,
+                expires=expires
+            )
+            
+        db.add(db_session)
+        db.commit()
         
         # Redirect to dashboard with cookie
         response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
         response.set_cookie(
             key="session",
-            value=token,
+            value=session_id,
             httponly=True,
             max_age=86400,  # 24 hours
             expires=86400,
@@ -500,7 +649,7 @@ async def resend_verification(
 @app.get("/profile")
 async def profile_page(
     request: Request, 
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_with_server_check),
     message: Optional[str] = None,
     message_type: Optional[str] = None
 ):
@@ -521,7 +670,7 @@ async def update_user_profile(
     request: Request,
     new_password: str = Form(""),
     confirm_password: str = Form(""),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_with_server_check),
     db: Session = Depends(get_db)
 ):
     """Update user profile"""
@@ -555,7 +704,7 @@ async def update_email_settings(
     imap_server: str = Form(...),
     smtp_server: str = Form(...),
     smtp_port: int = Form(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_with_server_check),
     db: Session = Depends(get_db)
 ):
     """Update email settings"""
@@ -593,7 +742,7 @@ async def test_email_connection(
     email_address: str = Form(...),
     email_password: str = Form(...),
     imap_server: str = Form(...),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user_with_server_check)
 ):
     """Test connection to email server"""
     if not current_user:
@@ -642,3 +791,160 @@ async def logout(
         response = RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
         response.delete_cookie(key="session")
         return response
+
+
+@app.get("/settings")
+async def settings_page(
+    request: Request, 
+    current_user: User = Depends(get_current_user_with_server_check),
+    message: Optional[str] = None,
+    message_type: Optional[str] = None
+):
+    """Render settings page"""
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+    
+    return templates.TemplateResponse("settings.html", {
+        "request": request,
+        "current_user": current_user,
+        "message": message,
+        "message_type": message_type
+    })
+
+@app.post("/settings/notifications")
+async def update_notification_settings(
+    request: Request,
+    notify_matches: bool = Form(False),
+    notify_auctions: bool = Form(False),
+    notify_bids: bool = Form(False),
+    digest_frequency: str = Form("realtime"),
+    current_user: User = Depends(get_current_user_with_server_check),
+    db: Session = Depends(get_db)
+):
+    """Update notification settings"""
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+    
+    try:
+        # Update user's notification preferences
+        if hasattr(current_user, 'notify_matches'):
+            current_user.notify_matches = notify_matches
+            current_user.notify_auctions = notify_auctions
+            current_user.notify_bids = notify_bids
+            current_user.digest_frequency = digest_frequency
+            
+            db.commit()
+            
+            return templates.TemplateResponse("settings.html", {
+                "request": request,
+                "current_user": current_user,
+                "message": "Notification settings updated successfully",
+                "message_type": "success"
+            })
+        else:
+            return templates.TemplateResponse("settings.html", {
+                "request": request,
+                "current_user": current_user,
+                "message": "Settings fields not available yet. Please run the database migration first.",
+                "message_type": "error"
+            })
+    except Exception as e:
+        logger.error(f"Error updating notification settings: {str(e)}")
+        return templates.TemplateResponse("settings.html", {
+            "request": request,
+            "current_user": current_user,
+            "message": f"Error updating notification settings: {str(e)}",
+            "message_type": "error"
+        })
+
+@app.post("/settings/display")
+async def update_display_settings(
+    request: Request,
+    show_ais_data: bool = Form(False),
+    show_vessel_history: bool = Form(False),
+    default_latitude: float = Form(0),
+    default_longitude: float = Form(0),
+    default_zoom: int = Form(3),
+    date_format: str = Form("iso"),
+    current_user: User = Depends(get_current_user_with_server_check),
+    db: Session = Depends(get_db)
+):
+    """Update display settings"""
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+    
+    try:
+        # Update user's display preferences
+        if hasattr(current_user, 'show_ais_data'):
+            current_user.show_ais_data = show_ais_data
+            current_user.show_vessel_history = show_vessel_history
+            current_user.default_latitude = default_latitude
+            current_user.default_longitude = default_longitude
+            current_user.default_zoom = default_zoom
+            current_user.date_format = date_format
+            
+            db.commit()
+            
+            return templates.TemplateResponse("settings.html", {
+                "request": request,
+                "current_user": current_user,
+                "message": "Display settings updated successfully",
+                "message_type": "success"
+            })
+        else:
+            return templates.TemplateResponse("settings.html", {
+                "request": request,
+                "current_user": current_user,
+                "message": "Settings fields not available yet. Please run the database migration first.",
+                "message_type": "error"
+            })
+    except Exception as e:
+        logger.error(f"Error updating display settings: {str(e)}")
+        return templates.TemplateResponse("settings.html", {
+            "request": request,
+            "current_user": current_user,
+            "message": f"Error updating display settings: {str(e)}",
+            "message_type": "error"
+        })
+
+@app.post("/settings/generate-api-key")
+async def generate_api_key(
+    request: Request,
+    current_user: User = Depends(get_current_user_with_server_check),
+    db: Session = Depends(get_db)
+):
+    """Generate a new API key for the user"""
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+    
+    try:
+        # Generate a new API key
+        if hasattr(current_user, 'api_key'):
+            api_key = f"sb_{uuid.uuid4().hex}_{secrets.token_hex(16)}"
+            current_user.api_key = api_key
+            
+            db.commit()
+            
+            return templates.TemplateResponse("settings.html", {
+                "request": request,
+                "current_user": current_user,
+                "message": "API key generated successfully",
+                "message_type": "success"
+            })
+        else:
+            return templates.TemplateResponse("settings.html", {
+                "request": request,
+                "current_user": current_user,
+                "message": "API key field not available yet. Please run the database migration first.",
+                "message_type": "error"
+            })
+    except Exception as e:
+        logger.error(f"Error generating API key: {str(e)}")
+        return templates.TemplateResponse("settings.html", {
+            "request": request,
+            "current_user": current_user,
+            "message": f"Error generating API key: {str(e)}",
+            "message_type": "error"
+        })
+
+
