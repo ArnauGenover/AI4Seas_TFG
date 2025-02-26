@@ -1,0 +1,248 @@
+<!-- src/ship_broker/web/templates/profile.html -->
+
+{% extends "base.html" %}
+
+{% block title %}Profile - Ship Broker{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4 mt-10">
+    <h2 class="text-2xl font-bold mb-6">Account Profile</h2>
+
+    {% if message %}
+    <div class="mb-4 p-4 rounded 
+        {% if message_type == 'success' %}
+        bg-green-100 border border-green-400 text-green-700
+        {% else %}
+        bg-red-100 border border-red-400 text-red-700
+        {% endif %}">
+        {{ message }}
+    </div>
+    {% endif %}
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- User Information -->
+        <div>
+            <h3 class="text-xl font-semibold mb-4">User Information</h3>
+            <form method="POST" action="/profile/update-user" class="space-y-4">
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="username">
+                        Username
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="username" type="text" name="username" value="{{ current_user.username }}" disabled>
+                </div>
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="email">
+                        Email
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="email" type="email" name="email" value="{{ current_user.email }}" disabled>
+                </div>
+                
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="new_password">
+                        New Password (leave blank to keep current)
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="new_password" type="password" name="new_password">
+                </div>
+                
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="confirm_password">
+                        Confirm New Password
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="confirm_password" type="password" name="confirm_password">
+                </div>
+                
+                <div>
+                    <button class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline" 
+                            type="submit">
+                        Update Profile
+                    </button>
+                </div>
+            </form>
+        </div>
+        
+        <!-- Email Settings -->
+        <div>
+            <!-- Email Setup Guide -->
+            <div class="mb-8 p-4 bg-blue-50 border border-blue-200 rounded-md">
+              <h3 class="text-lg font-medium text-blue-800 mb-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-1" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2h-1V9z" clip-rule="evenodd" />
+                </svg>
+                Important: Using Gmail with Ship Broker
+              </h3>
+              
+              <p class="mb-2">For security reasons, Gmail requires you to use an "App Password" instead of your regular password:</p>
+              
+              <ol class="list-decimal pl-5 mb-3 text-sm">
+                <li class="mb-1">Go to your <a href="https://myaccount.google.com/" target="_blank" class="text-blue-600 hover:underline">Google Account settings</a></li>
+                <li class="mb-1">Enable 2-Step Verification if not already enabled</li>
+                <li class="mb-1">Go to Security → App passwords</li>
+                <li class="mb-1">Select "Mail" and your device/app</li>
+                <li class="mb-1">Generate a new app password</li>
+                <li class="mb-1">Use that generated password in the "Email Password" field below</li>
+              </ol>
+              
+              <div class="flex items-center text-sm text-gray-600">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-1 text-yellow-500" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                </svg>
+                <span>This app password will only work with the Ship Broker application and is safer than using your main password.</span>
+              </div>
+
+              <div class="mt-3">
+                <button id="showMoreProviders" class="text-sm text-blue-600 hover:underline flex items-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                  </svg>
+                  Show instructions for other email providers
+                </button>
+                
+                <div id="otherProviders" class="hidden mt-3 text-sm border-t border-blue-200 pt-3">
+                  <h4 class="font-medium mb-2">Outlook/Hotmail:</h4>
+                  <ol class="list-decimal pl-5 mb-3">
+                    <li class="mb-1">Go to your Microsoft account's <a href="https://account.live.com/proofs/Manage/additional" target="_blank" class="text-blue-600 hover:underline">Security settings</a></li>
+                    <li class="mb-1">Create an "App Password" specifically for this application</li>
+                    <li class="mb-1">Use that password in the "Email Password" field below</li>
+                  </ol>
+                  
+                  <h4 class="font-medium mb-2">Yahoo Mail:</h4>
+                  <ol class="list-decimal pl-5 mb-3">
+                    <li class="mb-1">Go to your Yahoo <a href="https://login.yahoo.com/account/security" target="_blank" class="text-blue-600 hover:underline">Account security page</a></li>
+                    <li class="mb-1">Enable "2-step verification" if not already enabled</li>
+                    <li class="mb-1">Click "Generate app password"</li>
+                    <li class="mb-1">Use that password in the "Email Password" field below</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+
+            <h3 class="text-xl font-semibold mb-4">Email Settings for Ship Data</h3>
+            <form method="POST" action="/profile/update-email-settings" class="space-y-4">
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="email_address">
+                        Email Address
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="email_address" type="email" name="email_address" value="{{ current_user.email_address or '' }}" required>
+                </div>
+                
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="email_password">
+                        Email Password
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="email_password" type="password" name="email_password" placeholder="{% if current_user.encrypted_email_password %}••••••••••••{% else %}Enter email password{% endif %}">
+                    <p class="text-xs text-gray-500 mt-1">
+                        {% if current_user.encrypted_email_password %}Password is stored securely. Leave blank to keep current password.{% endif %}
+                    </p>
+                </div>
+                
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="imap_server">
+                        IMAP Server
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="imap_server" type="text" name="imap_server" value="{{ current_user.imap_server }}" required>
+                </div>
+                
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="smtp_server">
+                        SMTP Server
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="smtp_server" type="text" name="smtp_server" value="{{ current_user.smtp_server }}" required>
+                </div>
+                
+                <div>
+                    <label class="block text-gray-700 text-sm font-bold mb-2" for="smtp_port">
+                        SMTP Port
+                    </label>
+                    <input class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline" 
+                           id="smtp_port" type="number" name="smtp_port" value="{{ current_user.smtp_port }}" required>
+                </div>
+                
+                <div class="mb-4">
+                  <button type="button" id="testConnection" class="px-4 py-2 mr-2 bg-green-500 text-white rounded hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Test Connection
+                  </button>
+                  <span id="connectionStatus" class="text-sm"></span>
+                </div>
+                
+                <div>
+                    <button class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline" 
+                            type="submit">
+                        Update Email Settings
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Add JavaScript for email provider toggle and test connection -->
+<script>
+  // Toggle other email providers
+  document.getElementById('showMoreProviders').addEventListener('click', function() {
+    const otherProviders = document.getElementById('otherProviders');
+    const isHidden = otherProviders.classList.contains('hidden');
+    
+    if (isHidden) {
+      otherProviders.classList.remove('hidden');
+      this.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" /></svg> Hide instructions for other email providers';
+    } else {
+      otherProviders.classList.add('hidden');
+      this.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg> Show instructions for other email providers';
+    }
+  });
+
+  // Test email connection
+  document.getElementById('testConnection').addEventListener('click', function() {
+    const email = document.getElementById('email_address').value;
+    const password = document.getElementById('email_password').value;
+    const imapServer = document.getElementById('imap_server').value;
+    const statusEl = document.getElementById('connectionStatus');
+    
+    if (!email || !password || !imapServer) {
+      statusEl.textContent = "Please fill in all email fields first";
+      statusEl.className = "text-sm text-red-500";
+      return;
+    }
+    
+    statusEl.textContent = "Testing connection...";
+    statusEl.className = "text-sm text-gray-500";
+    
+    fetch('/test-email-connection', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        email_address: email,
+        email_password: password,
+        imap_server: imapServer
+      })
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.status === 'success') {
+        statusEl.textContent = "✓ " + data.message;
+        statusEl.className = "text-sm text-green-500";
+      } else {
+        statusEl.textContent = "✗ " + data.message;
+        statusEl.className = "text-sm text-red-500";
+      }
+    })
+    .catch(error => {
+      statusEl.textContent = "Error testing connection: " + error;
+      statusEl.className = "text-sm text-red-500";
+    });
+  });
+</script>
+{% endblock %}

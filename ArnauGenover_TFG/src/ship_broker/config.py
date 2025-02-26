@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     SECRET_KEY: str = os.getenv("SECRET_KEY", "BarcelonaMadrid2025.")  # Use env var if available
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
     
+    # SMTP Email Settings
+    SMTP_SERVER: str = "smtp.gmail.com"
+    SMTP_PORT: int = 465
+    
+    # Encryption settings
+    ENCRYPTION_KEY: str = os.getenv("ENCRYPTION_KEY", "YourEncryptionKeyHere-Must32BytesLong=")  # Use env var if available
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,

@@ -247,7 +247,8 @@ class EmailParser:
             return [], []
 
 
-    def _store_results(self, cargoes: List[CargoData], vessels: List[VesselData]):
+
+    def _store_results(self, cargoes: List[CargoData], vessels: List[VesselData], user_id: Optional[int] = None):
         """Store parsed results in database and create auctions for vessels with ETAs"""
         try:
             # Store cargoes
@@ -260,11 +261,12 @@ class EmailParser:
                     laycan_start=cargo.laycan_start,
                     laycan_end=cargo.laycan_end,
                     rate=cargo.rate,
-                    description=cargo.description
+                    description=cargo.description,
+                    owner_id=user_id  # Set owner_id
                 )
                 self.db.add(db_cargo)
             
-            from .auction_service import AuctionService  # Import here to avoid circular imports
+            from .auction_service import AuctionService
             auction_service = AuctionService(self.db)
             
             # Store vessels and create auctions if they have ETAs
@@ -276,7 +278,8 @@ class EmailParser:
                     eta=vessel.eta,
                     open_date=vessel.open_date,
                     vessel_type=vessel.vessel_type,
-                    description=vessel.description
+                    description=vessel.description,
+                    owner_id=user_id  # Set owner_id
                 )
                 self.db.add(db_vessel)
                 self.db.flush()  # Get ID without committing
@@ -284,12 +287,78 @@ class EmailParser:
                 # If vessel has ETA, create auction
                 if vessel.eta:
                     auction_service.create_auction_for_vessel(db_vessel.id)
-                
+                    
             self.db.commit()
         except Exception as e:
             logger.error(f"Database storage failed: {str(e)}")
             self.db.rollback()
             raise
+
+    def process_and_store_email(self, email_data: Union[str, Dict]) -> Tuple[List[Cargo], List[Vessel]]:
+        """Process email content and store results in database"""
+        cargoes = []
+        vessels = []
+        user_id = None
+
+        try:
+            # Extract user_id if present
+            if isinstance(email_data, dict) and 'user_id' in email_data:
+                user_id = email_data['user_id']
+                
+            # Handle both string and dict input
+            content = email_data['content'] if isinstance(email_data, dict) else email_data
+
+            if self.use_ai:
+                try:
+                    ai_results = self.ai.extract_info(content)
+                    if ai_results:
+                        # Process vessels from AI
+                        for vessel_data in ai_results.get('vessels', []):
+                            try:
+                                vessel = VesselData(**vessel_data)
+                                vessels.append(vessel)
+                            except Exception as e:
+                                logger.error(f"Failed to process AI vessel: {str(e)}")
+
+                        # Process cargoes from AI
+                        for cargo_data in ai_results.get('cargoes', []):
+                            try:
+                                cargo = CargoData(**cargo_data)
+                                if cargo.is_valid():
+                                    cargoes.append(cargo)
+                                else:
+                                    logger.debug(f"Invalid cargo from AI: {cargo_data}")
+                            except Exception as e:
+                                logger.error(f"Failed to process AI cargo: {str(e)}")
+                except Exception as e:
+                    logger.error(f"AI parsing failed: {str(e)}")
+
+            # Fallback to regex parsing if needed
+            if not vessels:
+                vessels.extend(self.extract_vessels(content))
+            if not cargoes:
+                cargoes.extend(self.extract_cargoes(content))
+
+            # Store results in database with user_id
+            self._store_results(cargoes, vessels, user_id)
+            
+            # Mark email as processed if we have message_id
+            if isinstance(email_data, dict) and email_data.get('message_id'):
+                processed = ProcessedEmail(
+                    message_id=email_data['message_id'],
+                    subject=email_data.get('subject', ''),
+                    user_id=user_id  # Set user_id
+                )
+                self.db.add(processed)
+                self.db.commit()
+
+            return cargoes, vessels
+        except Exception as e:
+            logger.error(f"Error processing email: {str(e)}")
+            self.db.rollback()
+            return [], []
+
+    
 
     def has_cargo_indicators(self, text: str) -> bool:
         """Check if text has strong cargo indicators"""

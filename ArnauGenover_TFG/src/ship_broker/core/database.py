@@ -6,7 +6,10 @@ from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
 import enum
 from passlib.context import CryptContext
-from ..config import settings
+from ..config import settings, get_settings
+from cryptography.fernet import Fernet
+from typing import Optional
+import uuid
 
 engine = create_engine(settings.SQLALCHEMY_DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -14,18 +17,38 @@ Base = declarative_base()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+settings_instance = get_settings()
+# Create encryption key - this should be stored securely
+fernet_key = Fernet(settings_instance.ENCRYPTION_KEY.encode())
+
 class ProcessedEmail(Base):
     __tablename__ = "processed_emails"
     
     id = Column(Integer, primary_key=True, index=True)
-    message_id = Column(String, unique=True, index=True)
+    message_id = Column(String, index=True)  
     subject = Column(String)
     processed_at = Column(DateTime, default=datetime.utcnow)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  
+    
+    # This will be defined after the User class is defined
+    user = None
 
 class AuctionStatus(enum.Enum):
     ACTIVE = "active"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+
+class Session(Base):
+    __tablename__ = "sessions"
+    
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(Integer, ForeignKey("users.id"))
+    expires = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_activity = Column(DateTime, default=datetime.utcnow)
+    
+    # This will be defined after the User class is defined
+    user = None
 
 class User(Base):
     __tablename__ = "users"
@@ -34,13 +57,24 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
-    is_active = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=False)
+    is_verified = Column(Boolean, default=False)
+    verification_code = Column(String, nullable=True)
+    verification_code_expires = Column(DateTime, nullable=True)
+    # Email settings for accessing user's mailbox
+    email_address = Column(String, nullable=True)
+    encrypted_email_password = Column(String, nullable=True)
+    imap_server = Column(String, default="imap.gmail.com")
+    smtp_server = Column(String, default="smtp.gmail.com")
+    smtp_port = Column(Integer, default=465)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
     vessels = relationship("Vessel", back_populates="owner")
     cargoes = relationship("Cargo", back_populates="owner")
     auctions = relationship("Auction", back_populates="owner")
+    processed_emails = relationship("ProcessedEmail", back_populates="user")
+    sessions = relationship("Session", back_populates="user", cascade="all, delete-orphan")
 
     def verify_password(self, plain_password: str) -> bool:
         return pwd_context.verify(plain_password, self.hashed_password)
@@ -48,6 +82,22 @@ class User(Base):
     @staticmethod
     def get_password_hash(password: str) -> str:
         return pwd_context.hash(password)
+    
+    # Methods for email password encryption/decryption
+    def set_email_password(self, password: str):
+        """Encrypt and store email password"""
+        if not password:
+            self.encrypted_email_password = None
+            return
+        encrypted = fernet_key.encrypt(password.encode())
+        self.encrypted_email_password = encrypted.decode()
+    
+    def get_email_password(self) -> Optional[str]:
+        """Decrypt and return email password"""
+        if not self.encrypted_email_password:
+            return None
+        decrypted = fernet_key.decrypt(self.encrypted_email_password.encode())
+        return decrypted.decode()
 
 class Vessel(Base):
     __tablename__ = "vessels"
@@ -109,7 +159,6 @@ class Auction(Base):
     vessel = relationship("Vessel", back_populates="auctions")
     bids = relationship("AuctionBid", back_populates="auction", cascade="all, delete-orphan")
 
-
 class AuctionBid(Base):
     __tablename__ = "auction_bids"
     
@@ -125,6 +174,10 @@ class AuctionBid(Base):
     
     # Existing relationships
     auction = relationship("Auction", back_populates="bids")
+
+# Define the relationship after both classes are defined
+ProcessedEmail.user = relationship("User", back_populates="processed_emails")
+Session.user = relationship("User", back_populates="sessions")
 
 # Create tables
 Base.metadata.create_all(bind=engine)

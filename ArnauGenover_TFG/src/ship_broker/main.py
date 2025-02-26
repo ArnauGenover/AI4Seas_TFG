@@ -1,27 +1,34 @@
 # src/ship_broker/main.py
 
-from fastapi import FastAPI, Request, Depends
+import os
+import uuid
+import jwt
+import asyncio
+import logging
+import imaplib
+from datetime import datetime, timedelta
+from typing import Optional
+
+from fastapi import (
+    FastAPI, Request, Depends, Form, status, Cookie
+)
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-import os
-import logging
+
+from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
-from .api.routes import vessels, cargoes, email_processing, test, matching, auctions, auth
-from .core.database import Base, engine
+from .core.database import Base, engine, Session as DbSession, User
 from .core.scheduler import start_scheduler
-from .api.routes.auth import get_current_user
 from .core.vessel_tracker import tracker
-
-from fastapi import Form, status
-from fastapi.responses import RedirectResponse
-import jwt
-from datetime import datetime, timedelta
-from .core.database import User
-from .api.dependencies import get_db  # Added missing import
-from sqlalchemy.orm import Session  # Added missing import
+from .core.email_service import generate_verification_code, send_verification_email
+from .api.routes import (
+    vessels, cargoes, email_processing, test, matching, auctions, auth
+)
+from .api.routes.auth import get_current_user
+from .api.dependencies import get_db
 
 # Configure logging
 logging.basicConfig(
@@ -215,6 +222,7 @@ async def health_check():
             "error": str(e)
         }
 
+
 @app.get("/login")
 async def login_page(request: Request):
     """Render login page"""
@@ -226,6 +234,76 @@ async def login_page(request: Request):
     except Exception as e:
         logger.error(f"Error rendering login page: {str(e)}")
         return {"error": "Error rendering page"}
+
+@app.post("/login")
+async def login_form(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    remember_me: bool = Form(False),
+    db: Session = Depends(get_db)
+):
+    """Process login form submission"""
+    try:
+        user = db.query(User).filter(User.email == username).first()
+        if not user or not user.verify_password(password):
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "Invalid email or password", "current_user": None}
+            )
+        
+        # Check if user is verified
+        if hasattr(user, 'is_verified') and not user.is_verified:
+            # Generate new verification code
+            verification_code = generate_verification_code()
+            expires = datetime.utcnow() + timedelta(minutes=30)
+            
+            user.verification_code = verification_code
+            user.verification_code_expires = expires
+            db.commit()
+            
+            # Send verification email
+            send_verification_email(user.email, verification_code)
+            
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "Your account is not verified. A new verification code has been sent to your email.", "current_user": None}
+            )
+        
+        # Set session duration based on remember_me
+        session_duration = 30 if remember_me else 1  # 30 days or 1 day
+        
+        # Create persistent session
+        session_id = str(uuid.uuid4())
+        expires = datetime.utcnow() + timedelta(days=session_duration)
+        
+        db_session = DbSession(
+            id=session_id,
+            user_id=user.id,
+            expires=expires
+        )
+        db.add(db_session)
+        db.commit()
+        
+        response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+        response.set_cookie(
+            key="session",
+            value=session_id,
+            httponly=True,
+            max_age=session_duration * 24 * 60 * 60,  # Convert days to seconds
+            expires=session_duration * 24 * 60 * 60,
+            secure=settings.COOKIE_SECURE if hasattr(settings, 'COOKIE_SECURE') else False,
+            samesite="lax"
+        )
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error processing login: {str(e)}")
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Login failed. Please try again.", "current_user": None}
+        )
+
 
 @app.get("/register")
 async def register_page(request: Request):
@@ -239,44 +317,6 @@ async def register_page(request: Request):
         logger.error(f"Error rendering register page: {str(e)}")
         return {"error": "Error rendering page"}
 
-@app.post("/login")
-async def login_form(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
-    db: Session = Depends(get_db)
-):
-    """Process login form submission"""
-    try:
-        user = db.query(User).filter(User.email == username).first()
-        if not user or not user.verify_password(password):
-            return templates.TemplateResponse(
-                "login.html",
-                {"request": request, "error": "Invalid email or password", "current_user": None}
-            )
-        
-        # Create JWT token
-        token = jwt.encode(
-            {"sub": str(user.id), "exp": datetime.utcnow() + timedelta(hours=24)},
-            settings.SECRET_KEY,
-            algorithm="HS256"
-        )
-        
-        response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
-        response.set_cookie(
-            key="session",
-            value=token,
-            httponly=True,
-            max_age=86400,  # 24 hours
-            expires=86400,
-        )
-        return response
-    except Exception as e:
-        logger.error(f"Error processing login: {str(e)}")
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Login failed. Please try again.", "current_user": None}
-        )
 
 @app.post("/register")
 async def register_form(
@@ -305,18 +345,300 @@ async def register_form(
                 {"request": request, "error": " and ".join(errors), "current_user": None}
             )
         
+        # Generate verification code
+        verification_code = generate_verification_code()
+        expires = datetime.utcnow() + timedelta(minutes=30)
+        
+        # Create new user with verification details
         user = User(
             email=email,
             username=username,
-            hashed_password=User.get_password_hash(password)
+            hashed_password=User.get_password_hash(password),
+            verification_code=verification_code,
+            verification_code_expires=expires,
+            is_active=False,
+            is_verified=False
         )
         db.add(user)
         db.commit()
-        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+        
+        # Send verification email
+        send_verification_email(email, verification_code)
+        
+        # Redirect to verification page
+        return RedirectResponse(
+            url=f"/verify?email={email}", 
+            status_code=status.HTTP_302_FOUND
+        )
     except Exception as e:
         logger.error(f"Error processing registration: {str(e)}")
         db.rollback()
         return templates.TemplateResponse(
             "register.html",
-            {"request": request, "error": "Registration failed. Please try again.", "current_user": None}
+            {"request": request, "error": f"Registration failed: {str(e)}", "current_user": None}
         )
+
+@app.get("/verify")
+async def verify_page(request: Request, email: str):
+    """Show verification page"""
+    return templates.TemplateResponse(
+        "verify.html", 
+        {"request": request, "email": email, "current_user": None}
+    )
+
+@app.post("/verify")
+async def verify_email(
+    request: Request,
+    code: str = Form(...),
+    email: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Process verification code"""
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        
+        if not user:
+            return templates.TemplateResponse(
+                "verify.html",
+                {"request": request, "email": email, "error": "User not found.", "current_user": None}
+            )
+        
+        if user.is_verified:
+            # If already verified, redirect to dashboard
+            return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+        
+        if datetime.utcnow() > user.verification_code_expires:
+            return templates.TemplateResponse(
+                "verify.html",
+                {"request": request, "email": email, "error": "Verification code has expired. Please request a new one.", "current_user": None}
+            )
+        
+        if user.verification_code != code:
+            return templates.TemplateResponse(
+                "verify.html",
+                {"request": request, "email": email, "error": "Invalid verification code.", "current_user": None}
+            )
+        
+        # Code is valid, activate user
+        user.is_verified = True
+        user.is_active = True
+        user.verification_code = None
+        db.commit()
+        
+        # Create a JWT token for the user
+        token = jwt.encode(
+            {"sub": str(user.id), "exp": datetime.utcnow() + timedelta(hours=24)},
+            settings.SECRET_KEY,
+            algorithm="HS256"
+        )
+        
+        # Redirect to dashboard with cookie
+        response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+        response.set_cookie(
+            key="session",
+            value=token,
+            httponly=True,
+            max_age=86400,  # 24 hours
+            expires=86400,
+        )
+        return response
+    except Exception as e:
+        logger.error(f"Error verifying email: {str(e)}")
+        return templates.TemplateResponse(
+            "verify.html",
+            {"request": request, "email": email, "error": f"Verification failed: {str(e)}", "current_user": None}
+        )
+
+
+
+@app.get("/resend-verification")
+async def resend_verification(
+    request: Request,
+    email: str,
+    db: Session = Depends(get_db)
+):
+    """Resend verification code"""
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        
+        if not user:
+            return templates.TemplateResponse(
+                "verify.html",
+                {"request": request, "email": email, "error": "User not found.", "current_user": None}
+            )
+        
+        if user.is_verified:
+            return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+        
+        # Generate new verification code
+        verification_code = generate_verification_code()
+        expires = datetime.utcnow() + timedelta(minutes=30)
+        
+        user.verification_code = verification_code
+        user.verification_code_expires = expires
+        db.commit()
+        
+        # Send new verification email
+        send_verification_email(email, verification_code)
+        
+        return templates.TemplateResponse(
+            "verify.html",
+            {
+                "request": request, 
+                "email": email, 
+                "success": "A new verification code has been sent to your email.",
+                "current_user": None
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error resending verification: {str(e)}")
+        return templates.TemplateResponse(
+            "verify.html",
+            {"request": request, "email": email, "error": f"Failed to resend verification code: {str(e)}", "current_user": None}
+        )
+
+@app.get("/profile")
+async def profile_page(
+    request: Request, 
+    current_user: User = Depends(get_current_user),
+    message: Optional[str] = None,
+    message_type: Optional[str] = None
+):
+    """Render profile page"""
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+    
+    return templates.TemplateResponse("profile.html", {
+        "request": request,
+        "current_user": current_user,
+        "message": message,
+        "message_type": message_type
+    })
+
+
+@app.post("/profile/update-user")
+async def update_user_profile(
+    request: Request,
+    new_password: str = Form(""),
+    confirm_password: str = Form(""),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update user profile"""
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+    
+    message = None
+    message_type = "error"
+    
+    if new_password:
+        if new_password != confirm_password:
+            message = "Passwords do not match"
+        else:
+            current_user.hashed_password = User.get_password_hash(new_password)
+            db.commit()
+            message = "Password updated successfully"
+            message_type = "success"
+    
+    return templates.TemplateResponse("profile.html", {
+        "request": request,
+        "current_user": current_user,
+        "message": message,
+        "message_type": message_type
+    })
+
+@app.post("/profile/update-email-settings")
+async def update_email_settings(
+    request: Request,
+    email_address: str = Form(...),
+    email_password: str = Form(""),
+    imap_server: str = Form(...),
+    smtp_server: str = Form(...),
+    smtp_port: int = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update email settings"""
+    if not current_user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+    
+    try:
+        current_user.email_address = email_address
+        if email_password:  # Only update password if provided
+            current_user.set_email_password(email_password)
+        current_user.imap_server = imap_server
+        current_user.smtp_server = smtp_server
+        current_user.smtp_port = smtp_port
+        
+        db.commit()
+        
+        return templates.TemplateResponse("profile.html", {
+            "request": request,
+            "current_user": current_user,
+            "message": "Email settings updated successfully",
+            "message_type": "success"
+        })
+    except Exception as e:
+        logger.error(f"Error updating email settings: {str(e)}")
+        return templates.TemplateResponse("profile.html", {
+            "request": request,
+            "current_user": current_user,
+            "message": f"Error updating email settings: {str(e)}",
+            "message_type": "error"
+        })
+
+@app.post("/test-email-connection")
+async def test_email_connection(
+    request: Request,
+    email_address: str = Form(...),
+    email_password: str = Form(...),
+    imap_server: str = Form(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Test connection to email server"""
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    
+    try:
+        # Try to connect to IMAP server
+        mail = imaplib.IMAP4_SSL(imap_server)
+        mail.login(email_address, email_password)
+        mail.logout()
+        
+        return {"status": "success", "message": "Connection successful!"}
+    except Exception as e:
+        return {"status": "error", "message": f"Connection failed: {str(e)}"}
+
+
+@app.get("/logout")
+async def logout(
+    request: Request,
+    session: Optional[str] = Cookie(None),
+    db: Session = Depends(get_db)
+):
+    """Log the user out by clearing the session"""
+    try:
+        # Delete session from database if it exists
+        if session:
+            db_session = db.query(DbSession).filter(DbSession.id == session).first()
+            if db_session:
+                db.delete(db_session)
+                db.commit()
+                logger.info(f"Session {session} deleted successfully")
+            else:
+                logger.warning(f"Session {session} not found in database")
+        
+        # Create response with deleted cookie
+        response = RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+        response.delete_cookie(key="session")
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error during logout: {str(e)}")
+        # Even if there's an error, try to delete the cookie
+        response = RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+        response.delete_cookie(key="session")
+        return response

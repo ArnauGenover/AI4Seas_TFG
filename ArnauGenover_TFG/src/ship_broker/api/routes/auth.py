@@ -1,17 +1,21 @@
 # src/ship_broker/api/routes/auth.py
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, Form, Cookie
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 import jwt
 from datetime import datetime, timedelta
-from ...core.database import User
+from typing import Optional
+import uuid
+from ...core.database import User, Session as DbSession
 from ...core.schemas import UserCreate
 from ..dependencies import get_db
 from ...config import get_settings
+import logging
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 router = APIRouter()
 templates = Jinja2Templates(directory="src/ship_broker/web/templates")
@@ -26,96 +30,128 @@ async def get_current_user(request: Request, db: Session = Depends(get_db)):
         return None
     
     try:
+        # First try JWT token (for backward compatibility)
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
         if user_id is None:
             return None
-        return db.query(User).filter(User.id == user_id).first()
-    except:
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            return user
+    except jwt.PyJWTError:
+        # If JWT decoding fails, try persistent session
+        try:
+            db_session = db.query(DbSession).filter(DbSession.id == token).first()
+            
+            if not db_session:
+                return None
+                
+            if db_session.expires < datetime.utcnow():
+                # Session expired, clean up
+                db.delete(db_session)
+                db.commit()
+                logger.info(f"Expired session removed: {token}")
+                return None
+            
+            # Update last activity
+            db_session.last_activity = datetime.utcnow()
+            db.commit()
+            
+            return db_session.user
+        except Exception as e:
+            logger.error(f"Error retrieving session: {str(e)}")
+            return None
+    except Exception as e:
+        logger.error(f"Error in authentication: {str(e)}")
         return None
 
-@router.get("/login")
-async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "current_user": None})
-
-@router.post("/login")
-async def login(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
+# API token endpoint for programmatic access
+@router.post("/token")
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
-    user = db.query(User).filter(User.email == username).first()
-    if not user or not user.verify_password(password):
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "error": "Invalid email or password", "current_user": None}
+    user = db.query(User).filter(User.email == form_data.username).first()
+    if not user or not user.verify_password(form_data.password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Create JWT token
-    token = jwt.encode(
-        {"sub": str(user.id), "exp": datetime.utcnow() + timedelta(hours=24)},
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )
+    # Create JWT token for API access
+    token_data = {
+        "sub": str(user.id),
+        "exp": datetime.utcnow() + timedelta(minutes=30)
+    }
+    token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
     
-    response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
-    response.set_cookie(
-        key="session",
-        value=token,
-        httponly=True,
-        max_age=86400,  # 24 hours
-        expires=86400,
-    )
-    return response
+    return {"access_token": token, "token_type": "bearer"}
 
-@router.get("/register")
-async def register_page(request: Request):
-    return templates.TemplateResponse("register.html", {"request": request, "current_user": None})
-
-@router.post("/register")
-async def register(
+# New endpoint to view active sessions (for profile page)
+@router.get("/sessions")
+async def get_user_sessions(
     request: Request,
-    username: str = Form(...),
-    email: str = Form(...),
-    password: str = Form(...),
+    current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # Check for existing email
-    existing_email = db.query(User).filter(User.email == email).first()
-    # Check for existing username
-    existing_username = db.query(User).filter(User.username == username).first()
-
-    errors = []
-    if existing_email:
-        errors.append("Email is already registered")
-    if existing_username:
-        errors.append("Username is already taken")
-
-    if errors:
-        return templates.TemplateResponse(
-            "register.html",
-            {"request": request, "error": " and ".join(errors), "current_user": None}
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
         )
     
-    try:
-        user = User(
-            email=email,
-            username=username,
-            hashed_password=User.get_password_hash(password)
-        )
-        db.add(user)
-        db.commit()
-        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
-    except Exception as e:
-        db.rollback()
-        return templates.TemplateResponse(
-            "register.html",
-            {"request": request, "error": "Registration failed. Please try again.", "current_user": None}
-        )
+    sessions = db.query(DbSession).filter(
+        DbSession.user_id == current_user.id,
+        DbSession.expires > datetime.utcnow()
+    ).all()
+    
+    return {
+        "sessions": [
+            {
+                "id": session.id,
+                "created_at": session.created_at,
+                "expires": session.expires,
+                "last_activity": session.last_activity
+            } for session in sessions
+        ]
+    }
 
-@router.get("/logout")
-async def logout():
-    response = RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
-    response.delete_cookie("session")
-    return response
+# New endpoint to terminate a specific session
+@router.delete("/sessions/{session_id}")
+async def terminate_session(
+    session_id: str,
+    current_user = Depends(get_current_user),
+    current_session: Optional[str] = Cookie(None),
+    db: Session = Depends(get_db)
+):
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    # Find the session
+    session = db.query(DbSession).filter(
+        DbSession.id == session_id,
+        DbSession.user_id == current_user.id
+    ).first()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+    
+    # Delete the session
+    db.delete(session)
+    db.commit()
+    
+    # If user terminated their current session, log them out
+    if session_id == current_session:
+        response = RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
+        response.delete_cookie("session")
+        return response
+    
+    return {"status": "success"}
