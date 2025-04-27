@@ -5,7 +5,7 @@
 {% block content %}
 <div class="max-w-5xl mx-auto">  <!-- Changed from max-w-6xl to max-w-5xl -->
     <div class="flex justify-between items-center mb-8">
-        <h1 class="text-3xl font-bold">Vessels</h1>
+        <h1 class="text-3xl font-bold">Your Vessels</h1>
         <div class="space-x-4">
             <span id="last-update" class="text-gray-500"></span>
             <button onclick="refreshData()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
@@ -14,6 +14,25 @@
             <button onclick="processEmails()" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
                 Process Emails Now
             </button>
+        </div>
+    </div>
+    
+    <!-- Email Config Notice -->
+    <div id="emailNotConfigured" class="hidden mb-6 bg-yellow-100 border-l-4 border-yellow-500 p-4">
+        <div class="flex">
+            <div class="flex-shrink-0">
+                <svg class="h-5 w-5 text-yellow-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <div class="ml-3">
+                <p class="text-sm text-yellow-700">
+                    You haven't configured your email settings yet. To get vessel data from emails, 
+                    <a href="/profile" class="font-medium underline text-yellow-700 hover:text-yellow-600">
+                        set up your email settings in your profile
+                    </a>.
+                </p>
+            </div>
         </div>
     </div>
     
@@ -92,6 +111,24 @@ function getVesselStatus(vessel) {
     return `<span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800">
                 No Status
             </span>`;
+}
+
+async function checkEmailConfiguration() {
+    try {
+        const response = await fetch('/api/v1/email-stats');
+        const data = await response.json();
+        
+        const emailNotConfigured = document.getElementById('emailNotConfigured');
+        if (emailNotConfigured) {
+            if (!data.email_configured) {
+                emailNotConfigured.classList.remove('hidden');
+            } else {
+                emailNotConfigured.classList.add('hidden');
+            }
+        }
+    } catch (error) {
+        console.error('Error checking email configuration:', error);
+    }
 }
 
 async function showAvailableCargoes(vesselId, vesselName) {
@@ -249,28 +286,45 @@ function refreshData() {
         });
 }
 
-function processEmails() {
+async function processEmails() {
     const button = event.target;
     button.disabled = true;
     button.textContent = 'Processing...';
     
-    fetch('/api/v1/process-emails/', { 
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-    })
-    .then(response => response.json())
-    .then(data => {
-        refreshData();
-        button.textContent = 'Process Emails Now';
-        button.disabled = false;
-    })
-    .catch(error => {
+    try {
+        const response = await fetch('/process-emails', { 
+            method: 'POST',
+        });
+        
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+            // Show success message
+            const statusEl = document.createElement('div');
+            statusEl.className = 'fixed top-4 right-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded';
+            statusEl.innerHTML = `
+                <strong class="font-bold">Success!</strong>
+                <span class="block sm:inline">${data.message}</span>
+            `;
+            document.body.appendChild(statusEl);
+            
+            // Remove message after 5 seconds
+            setTimeout(() => {
+                statusEl.remove();
+            }, 5000);
+            
+            // Refresh data after processing
+            setTimeout(refreshData, 2000);
+        } else {
+            alert(`Error: ${data.message}`);
+        }
+    } catch (error) {
         console.error('Error:', error);
         button.textContent = 'Error - Try Again';
+    } finally {
         button.disabled = false;
-    });
+        button.textContent = 'Process Emails Now';
+    }
 }
 
 // Close modal when clicking outside
@@ -280,10 +334,16 @@ document.getElementById('cargoesModal').addEventListener('click', function(event
     }
 });
 
-// Load initial data
-refreshData();
+// On page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Check if email is configured
+    checkEmailConfiguration();
+    
+    // Load initial data
+    refreshData();
 
-// Refresh data every 60 seconds
-setInterval(refreshData, 60000);
+    // Refresh data every 60 seconds
+    setInterval(refreshData, 60000);
+});
 </script>
 {% endblock %}

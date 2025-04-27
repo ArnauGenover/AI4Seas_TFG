@@ -4,7 +4,7 @@
 {% block content %}
 <div class="max-w-7xl mx-auto">
     <div class="flex justify-between items-center mb-8">
-        <h1 class="text-3xl font-bold">Cargoes</h1>
+        <h1 class="text-3xl font-bold">Your Cargoes</h1>
         <div class="space-x-4">
             <span id="last-update" class="text-gray-500"></span>
             <button onclick="refreshData()" class="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
@@ -13,6 +13,25 @@
             <button onclick="processEmails()" class="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600">
                 Process Emails Now
             </button>
+        </div>
+    </div>
+    
+    <!-- Email Config Notice -->
+    <div id="emailNotConfigured" class="hidden mb-6 bg-yellow-100 border-l-4 border-yellow-500 p-4">
+        <div class="flex">
+            <div class="flex-shrink-0">
+                <svg class="h-5 w-5 text-yellow-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                </svg>
+            </div>
+            <div class="ml-3">
+                <p class="text-sm text-yellow-700">
+                    You haven't configured your email settings yet. To get cargo data from emails, 
+                    <a href="/profile" class="font-medium underline text-yellow-700 hover:text-yellow-600">
+                        set up your email settings in your profile
+                    </a>.
+                </p>
+            </div>
         </div>
     </div>
     
@@ -66,7 +85,23 @@ function formatQuantity(quantity) {
     return quantity.toLocaleString() + ' MT';
 }
 
-// In cargoes.html, update the showAvailableVessels function
+async function checkEmailConfiguration() {
+    try {
+        const response = await fetch('/api/v1/email-stats');
+        const data = await response.json();
+        
+        const emailNotConfigured = document.getElementById('emailNotConfigured');
+        if (emailNotConfigured) {
+            if (!data.email_configured) {
+                emailNotConfigured.classList.remove('hidden');
+            } else {
+                emailNotConfigured.classList.add('hidden');
+            }
+        }
+    } catch (error) {
+        console.error('Error checking email configuration:', error);
+    }
+}
 
 async function showAvailableVessels(cargoId) {
     console.log('Finding vessels for cargo:', cargoId);
@@ -232,8 +267,46 @@ function refreshData() {
         });
 }
 
-function processEmails() {
-    // Add email processing function if needed
+async function processEmails() {
+    const button = event.target;
+    button.disabled = true;
+    button.textContent = 'Processing...';
+    
+    try {
+        const response = await fetch('/process-emails', { 
+            method: 'POST',
+        });
+        
+        const data = await response.json();
+        
+        if (data.status === 'success') {
+            // Show success message
+            const statusEl = document.createElement('div');
+            statusEl.className = 'fixed top-4 right-4 bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded';
+            statusEl.innerHTML = `
+                <strong class="font-bold">Success!</strong>
+                <span class="block sm:inline">${data.message}</span>
+            `;
+            document.body.appendChild(statusEl);
+            
+            // Remove message after 5 seconds
+            setTimeout(() => {
+                statusEl.remove();
+            }, 5000);
+            
+            // Refresh data after processing
+            setTimeout(refreshData, 2000);
+        } else {
+            alert(`Error: ${data.message}`);
+        }
+    } catch (error) {
+        console.error('Error processing emails:', error);
+        alert(`Error processing emails: ${error.message}`);
+    } finally {
+        // Reset button
+        button.disabled = false;
+        button.textContent = 'Process Emails Now';
+    }
 }
 
 // Close modal when clicking outside
@@ -243,10 +316,16 @@ document.getElementById('vesselsModal').addEventListener('click', function(event
     }
 });
 
-// Initial load
-refreshData();
-
-// Refresh every 60 seconds
-setInterval(refreshData, 60000);
+// On page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Check if email is configured
+    checkEmailConfiguration();
+    
+    // Initial load
+    refreshData();
+    
+    // Refresh every 60 seconds
+    setInterval(refreshData, 60000);
+});
 </script>
 {% endblock %}

@@ -3,7 +3,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
-from .database import AuctionStatus  # Add this import
+from .database import AuctionStatus  
 
 
 class UserBase(BaseModel):

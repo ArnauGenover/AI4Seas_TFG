@@ -94,10 +94,10 @@ def _calculate_match_score(vessel: Dict, cargo: Cargo) -> float:
     try:
         score = 0.0
         
-        # Size compatibility (40% of score)
+        # Size compatibility (30% of score)
         if cargo.quantity and vessel.get('dwt'):
             utilization = cargo.quantity / vessel['dwt']
-            score += min(1.0, utilization) * 0.4
+            score += min(1.0, utilization) * 0.3
 
         # Location score (30% of score)
         if vessel.get('position') and cargo.load_port:
@@ -105,17 +105,20 @@ def _calculate_match_score(vessel: Dict, cargo: Cargo) -> float:
                 score += 0.3
             # Could add partial scores for nearby ports
 
-        # Timing score (30% of score)
+        # Timing score (20% of score)
         if vessel.get('eta') and cargo.laycan_start:
             try:
                 eta = datetime.fromisoformat(vessel['eta'])
                 laycan = datetime.fromisoformat(cargo.laycan_start)
                 if abs((eta - laycan).days) <= 3:  # Within 3 days
-                    score += 0.3
+                    score += 0.2
                 elif abs((eta - laycan).days) <= 7:  # Within a week
-                    score += 0.15
+                    score += 0.1
             except Exception:
                 pass
+
+        # Type compatibility (20% of score) - not implemented in this function
+        # but could be added for completeness
 
         return min(1.0, score)
     except Exception as e:

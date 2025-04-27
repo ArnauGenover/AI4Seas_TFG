@@ -114,8 +114,12 @@ class User(Base):
         """Decrypt and return email password"""
         if not self.encrypted_email_password:
             return None
-        decrypted = fernet_key.decrypt(self.encrypted_email_password.encode())
-        return decrypted.decode()
+        try:
+            decrypted = fernet_key.decrypt(self.encrypted_email_password.encode())
+            return decrypted.decode()
+        except Exception as e:
+            logger.error(f"Error decrypting email password: {str(e)}")
+            return None
 
 class Vessel(Base):
     __tablename__ = "vessels"

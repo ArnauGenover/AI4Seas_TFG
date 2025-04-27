@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from typing import Dict, List, Optional, Tuple, Union
 
 from .openai_helper import OpenAIHelper
-from .database import Cargo, Vessel, ProcessedEmail  # Added ProcessedEmail import
+from .database import Cargo, Vessel, ProcessedEmail, User
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +89,12 @@ class CargoData:
                   for pattern in suspicious_patterns)
 
 class EmailParser:
-    def __init__(self, email_address: str, password: str, db: Session, imap_server: str = "imap.gmail.com"):
+    def __init__(self, email_address: str, password: str, db: Session, imap_server: str = "imap.gmail.com", user_id: Optional[int] = None):
         self.email_address = email_address
         self.password = password
         self.imap_server = imap_server
         self.db = db
+        self.user_id = user_id
         try:
             self.ai = OpenAIHelper()  
             self.use_ai = True       
@@ -109,7 +110,7 @@ class EmailParser:
 
     def get_emails(self, days: int = 1) -> List[Dict]:
         """Fetch emails from last X days, excluding already processed ones"""
-        logger.info(f"Fetching emails from last {days} days")
+        logger.info(f"Fetching emails from last {days} days for user_id: {self.user_id}")
         mail = self.connect()
         mail.select('INBOX')
         
@@ -117,7 +118,12 @@ class EmailParser:
         _, messages = mail.search(None, f'(SINCE "{date}")')
         
         emails_data = []
-        processed_ids = {pe.message_id for pe in self.db.query(ProcessedEmail.message_id).all()}
+        
+        # Get processed email IDs for this user
+        processed_query = self.db.query(ProcessedEmail.message_id)
+        if self.user_id:
+            processed_query = processed_query.filter(ProcessedEmail.user_id == self.user_id)
+        processed_ids = {pe.message_id for pe in processed_query.all()}
         
         for num in messages[0].split():
             _, msg_data = mail.fetch(num, '(RFC822)')
@@ -133,9 +139,16 @@ class EmailParser:
             
             # Skip if subject matches a previously processed email
             subject = email_message["subject"] or ""
-            if self.db.query(ProcessedEmail).filter(
+            processed_subject_query = self.db.query(ProcessedEmail).filter(
                 ProcessedEmail.subject == subject
-            ).first():
+            )
+            
+            if self.user_id:
+                processed_subject_query = processed_subject_query.filter(
+                    ProcessedEmail.user_id == self.user_id
+                )
+                
+            if processed_subject_query.first():
                 logger.info(f"Skipping already processed subject: {subject}")
                 continue
             
@@ -145,13 +158,13 @@ class EmailParser:
             emails_data.append({
                 'subject': subject,
                 'content': content,
-                'message_id': message_id
+                'message_id': message_id,
+                'user_id': self.user_id  # Include user_id in email data
             })
         
         mail.close()
         mail.logout()
         return emails_data
-
     
     def has_vessel_indicators(self, text: str) -> bool:
         """Check if text has strong vessel indicators"""
@@ -192,12 +205,22 @@ class EmailParser:
         """Process email content and store results in database"""
         cargoes = []
         vessels = []
+        user_id = None
 
         try:
+            # Extract user_id if present
+            if isinstance(email_data, dict) and 'user_id' in email_data:
+                user_id = email_data['user_id']
+                
             # Handle both string and dict input
             content = email_data['content'] if isinstance(email_data, dict) else email_data
 
-            if self.use_ai:
+            # First try regex-based parsing as the primary method
+            vessels = self.extract_vessels(content)
+            cargoes = self.extract_cargoes(content)
+            
+            # Only try AI if regex didn't find anything and AI is available
+            if (not vessels or not cargoes) and self.use_ai:
                 try:
                     ai_results = self.ai.extract_info(content)
                     if ai_results:
@@ -205,7 +228,8 @@ class EmailParser:
                         for vessel_data in ai_results.get('vessels', []):
                             try:
                                 vessel = VesselData(**vessel_data)
-                                vessels.append(vessel)
+                                if not any(v.name == vessel.name for v in vessels):  # Avoid duplicates
+                                    vessels.append(vessel)
                             except Exception as e:
                                 logger.error(f"Failed to process AI vessel: {str(e)}")
 
@@ -213,29 +237,26 @@ class EmailParser:
                         for cargo_data in ai_results.get('cargoes', []):
                             try:
                                 cargo = CargoData(**cargo_data)
-                                if cargo.is_valid():
+                                if cargo.is_valid() and not any(c.cargo_type == cargo.cargo_type and 
+                                                            c.quantity == cargo.quantity for c in cargoes):
                                     cargoes.append(cargo)
                                 else:
-                                    logger.debug(f"Invalid cargo from AI: {cargo_data}")
+                                    logger.debug(f"Invalid or duplicate cargo from AI: {cargo_data}")
                             except Exception as e:
                                 logger.error(f"Failed to process AI cargo: {str(e)}")
                 except Exception as e:
-                    logger.error(f"AI parsing failed: {str(e)}")
+                    logger.warning(f"AI parsing failed (continuing with regex results): {str(e)}")
 
-            # Fallback to regex parsing if needed
-            if not vessels:
-                vessels.extend(self.extract_vessels(content))
-            if not cargoes:
-                cargoes.extend(self.extract_cargoes(content))
-
-            # Store results in database
-            self._store_results(cargoes, vessels)
+            # Store results in database with owner ID
+            logger.info(f"Storing {len(vessels)} vessels and {len(cargoes)} cargoes for user_id {user_id}")
+            self._store_results(cargoes, vessels, user_id)
             
             # Mark email as processed if we have message_id
             if isinstance(email_data, dict) and email_data.get('message_id'):
                 processed = ProcessedEmail(
                     message_id=email_data['message_id'],
-                    subject=email_data.get('subject', '')
+                    subject=email_data.get('subject', ''),
+                    user_id=user_id
                 )
                 self.db.add(processed)
                 self.db.commit()
@@ -245,8 +266,6 @@ class EmailParser:
             logger.error(f"Error processing email: {str(e)}")
             self.db.rollback()
             return [], []
-
-
 
     def _store_results(self, cargoes: List[CargoData], vessels: List[VesselData], user_id: Optional[int] = None):
         """Store parsed results in database and create auctions for vessels with ETAs"""
@@ -262,7 +281,7 @@ class EmailParser:
                     laycan_end=cargo.laycan_end,
                     rate=cargo.rate,
                     description=cargo.description,
-                    owner_id=user_id  # Set owner_id
+                    owner_id=user_id
                 )
                 self.db.add(db_cargo)
             
@@ -279,86 +298,20 @@ class EmailParser:
                     open_date=vessel.open_date,
                     vessel_type=vessel.vessel_type,
                     description=vessel.description,
-                    owner_id=user_id  # Set owner_id
+                    owner_id=user_id
                 )
                 self.db.add(db_vessel)
                 self.db.flush()  # Get ID without committing
                 
                 # If vessel has ETA, create auction
                 if vessel.eta:
-                    auction_service.create_auction_for_vessel(db_vessel.id)
+                    auction_service.create_auction_for_vessel(db_vessel.id, user_id)
                     
             self.db.commit()
         except Exception as e:
             logger.error(f"Database storage failed: {str(e)}")
             self.db.rollback()
             raise
-
-    def process_and_store_email(self, email_data: Union[str, Dict]) -> Tuple[List[Cargo], List[Vessel]]:
-        """Process email content and store results in database"""
-        cargoes = []
-        vessels = []
-        user_id = None
-
-        try:
-            # Extract user_id if present
-            if isinstance(email_data, dict) and 'user_id' in email_data:
-                user_id = email_data['user_id']
-                
-            # Handle both string and dict input
-            content = email_data['content'] if isinstance(email_data, dict) else email_data
-
-            if self.use_ai:
-                try:
-                    ai_results = self.ai.extract_info(content)
-                    if ai_results:
-                        # Process vessels from AI
-                        for vessel_data in ai_results.get('vessels', []):
-                            try:
-                                vessel = VesselData(**vessel_data)
-                                vessels.append(vessel)
-                            except Exception as e:
-                                logger.error(f"Failed to process AI vessel: {str(e)}")
-
-                        # Process cargoes from AI
-                        for cargo_data in ai_results.get('cargoes', []):
-                            try:
-                                cargo = CargoData(**cargo_data)
-                                if cargo.is_valid():
-                                    cargoes.append(cargo)
-                                else:
-                                    logger.debug(f"Invalid cargo from AI: {cargo_data}")
-                            except Exception as e:
-                                logger.error(f"Failed to process AI cargo: {str(e)}")
-                except Exception as e:
-                    logger.error(f"AI parsing failed: {str(e)}")
-
-            # Fallback to regex parsing if needed
-            if not vessels:
-                vessels.extend(self.extract_vessels(content))
-            if not cargoes:
-                cargoes.extend(self.extract_cargoes(content))
-
-            # Store results in database with user_id
-            self._store_results(cargoes, vessels, user_id)
-            
-            # Mark email as processed if we have message_id
-            if isinstance(email_data, dict) and email_data.get('message_id'):
-                processed = ProcessedEmail(
-                    message_id=email_data['message_id'],
-                    subject=email_data.get('subject', ''),
-                    user_id=user_id  # Set user_id
-                )
-                self.db.add(processed)
-                self.db.commit()
-
-            return cargoes, vessels
-        except Exception as e:
-            logger.error(f"Error processing email: {str(e)}")
-            self.db.rollback()
-            return [], []
-
-    
 
     def has_cargo_indicators(self, text: str) -> bool:
         """Check if text has strong cargo indicators"""
@@ -402,6 +355,7 @@ class EmailParser:
             r'\bEXPECTED\b'
         ]
         return any(re.search(pattern, text, re.IGNORECASE) for pattern in position_indicators)
+
 
     def clean_rate(self, rate: str) -> Optional[str]:
         """Clean and standardize rate format"""
@@ -470,48 +424,25 @@ class EmailParser:
         
         return cargoes
 
-
     def extract_vessels(self, text: str) -> List[VesselData]:
         """Extract vessel information with regex"""
         logger.info("Extracting vessel information")
         vessels = []
         
-        vessel_indicators = [
-            r'VESSEL\s+DETAILS?:?',
-            r'M/?V\s+',
-            r'NAME\s*:',
-            r'SHIP\s+DETAILS?:?'
-        ]
-        
         sections = re.split(r'\n\s*\n', text)
         
-        # Skip vessel extraction if we see cargo indicators in the header
-        cargo_headers = [
-            r'PROPOSE\s+(?:SUITABLE\s+)?CGOES',
-            r'PLS\s+(?:DO\s+)?NOT\s+RECIRCULATE',
-            r'AVAILABLE\s+CARGOES?:',
-        ]
-        
-        if any(re.search(pattern, sections[0], re.IGNORECASE) for pattern in cargo_headers):
-            logger.info("Skipping vessel extraction due to cargo headers")
-            return vessels
-        
         for section in sections:
-            is_vessel_section = any(
-                re.search(pattern, section, re.IGNORECASE) 
-                for pattern in vessel_indicators
-            )
+            # Improved vessel name extraction
+            name_match = re.search(r'(?:VESSEL\s+NAME|NAME|M/?V)\s*:?\s*([A-Z][A-Z0-9\s]+)', section, re.IGNORECASE)
             
-            name_match = re.search(r'(?:VESSEL|NAME|M/?V)\s*:?\s*([A-Z][A-Z\s]+)', section, re.IGNORECASE)
-            
-            if name_match and (is_vessel_section or self.has_vessel_indicators(section)):
+            if name_match:
                 vessel_name = name_match.group(1).strip()
                 
                 # Extract basic information
                 dwt_match = re.search(r'(?:DWT|DEADWEIGHT)\s*:?\s*([\d,\.]+)', section, re.IGNORECASE)
-                position_match = re.search(r'(?:POSITION|PORT|LOC)\s*:?\s*([A-Z][A-Z\s]+)', section, re.IGNORECASE)
+                position_match = re.search(r'(?:POSITION|PORT|LOC|OPEN\s+POSITION)\s*:?\s*([A-Z][A-Z\s,]+)', section, re.IGNORECASE)
                 type_match = re.search(r'(?:TYPE|VESSEL TYPE)\s*:?\s*([A-Z][A-Z\s]+)', section, re.IGNORECASE)
-                eta_match = re.search(r'ETA\s*:?\s*([\d\-\.\/]+\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)?(?:\s*\d{4})?)', section, re.IGNORECASE)
+                eta_match = re.search(r'ETA\s*(?:LOAD\s+PORT)?\s*:?\s*([\d\-\.\/]+\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)?(?:\s*\d{4})?)', section, re.IGNORECASE)
                 open_match = re.search(r'OPEN\s*:?\s*([\d\-\.\/]+\s*(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)?(?:\s*\d{4})?)', section, re.IGNORECASE)
                 
                 # Extract rate information
@@ -521,25 +452,24 @@ class EmailParser:
                     rate_value = float(rate_match.group(1).replace(',', ''))
                     rate = f"USD {rate_value}/MT"
                 
-                if not self.is_cargo_section(section):
-                    logger.info(f"Found vessel: {vessel_name}")
-                    
-                    description = self.clean_description(section)
-                    
-                    # Add rate to description if found
-                    if rate:
-                        description = f"Rate: {rate}. " + description
-                    
-                    vessel = VesselData(
-                        name=vessel_name,
-                        dwt=float(dwt_match.group(1).replace(',', '')) if dwt_match else None,
-                        position=position_match.group(1).strip() if position_match else None,
-                        vessel_type=type_match.group(1).strip() if type_match else None,
-                        eta=self.parse_date(eta_match.group(1)) if eta_match else None,
-                        open_date=self.parse_date(open_match.group(1)) if open_match else None,
-                        description=description
-                    )
-                    vessels.append(vessel)
+                logger.info(f"Found vessel: {vessel_name}")
+                
+                description = self.clean_description(section)
+                
+                # Add rate to description if found
+                if rate:
+                    description = f"Rate: {rate}. " + description
+                
+                vessel = VesselData(
+                    name=vessel_name,
+                    dwt=float(dwt_match.group(1).replace(',', '')) if dwt_match else None,
+                    position=position_match.group(1).strip() if position_match else None,
+                    vessel_type=type_match.group(1).strip() if type_match else None,
+                    eta=self.parse_date(eta_match.group(1)) if eta_match else None,
+                    open_date=self.parse_date(open_match.group(1)) if open_match else None,
+                    description=description
+                )
+                vessels.append(vessel)
         
         return vessels
     

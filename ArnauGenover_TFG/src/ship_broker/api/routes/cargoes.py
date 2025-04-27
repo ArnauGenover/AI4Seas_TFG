@@ -1,6 +1,6 @@
 # src/ship_broker/api/routes/cargoes.py
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
 from datetime import datetime
@@ -11,6 +11,8 @@ from ...core.schemas import CargoCreate, CargoResponse
 from ...core.cargo_tracker import CargoTracker
 from ...core.vessel_tracker import tracker
 from ..dependencies import get_db
+from ..routes.auth import get_current_user
+from ...core.database import Cargo, Vessel, User
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,21 +22,43 @@ router = APIRouter()
 async def get_cargoes(
     skip: int = 0,
     limit: int = 100,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
-    """Get all cargoes with pagination"""
+    """Get all cargoes for the authenticated user with pagination"""
     try:
-        cargoes = db.query(Cargo).order_by(Cargo.created_at.desc()).offset(skip).limit(limit).all()
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required"
+            )
+            
+        cargoes = db.query(Cargo).filter(
+            Cargo.owner_id == current_user.id
+        ).order_by(Cargo.created_at.desc()).offset(skip).limit(limit).all()
+        
         return cargoes
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting cargoes: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/cargoes", response_model=CargoResponse)
 @router.post("/cargoes/", response_model=CargoResponse)
-async def create_cargo(cargo: CargoCreate, db: Session = Depends(get_db)):
-    """Create a new cargo"""
+async def create_cargo(
+    cargo: CargoCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Create a new cargo for the authenticated user"""
     try:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required"
+            )
+            
         db_cargo = Cargo(
             cargo_type=cargo.cargo_type,
             quantity=cargo.quantity,
@@ -43,74 +67,92 @@ async def create_cargo(cargo: CargoCreate, db: Session = Depends(get_db)):
             laycan_start=cargo.laycan_start,
             laycan_end=cargo.laycan_end,
             description=cargo.description,
-            rate=cargo.rate
+            rate=cargo.rate,
+            owner_id=current_user.id  # Set owner to current user
         )
         db.add(db_cargo)
         db.commit()
         db.refresh(db_cargo)
         return db_cargo
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Error creating cargo: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/my-cargoes")
+async def get_my_cargoes(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get cargoes owned by the current user"""
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
+    cargoes = db.query(Cargo).filter(Cargo.owner_id == current_user.id).all()
+    return cargoes
+
+
 @router.get("/cargoes/match/{cargo_id}/vessels", response_model=List[Dict])
-async def get_matching_vessels(cargo_id: int, db: Session = Depends(get_db)):
+async def get_matching_vessels(
+    cargo_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     """Get vessels that match a specific cargo"""
     try:
-        cargo = db.query(Cargo).filter(Cargo.id == cargo_id).first()
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required"
+            )
+            
+        # Get the cargo and verify ownership
+        cargo = db.query(Cargo).filter(
+            Cargo.id == cargo_id,
+            Cargo.owner_id == current_user.id
+        ).first()
+        
         if not cargo:
             raise HTTPException(status_code=404, detail="Cargo not found")
 
-        # Get live vessels from tracker
-        if not tracker.vessels_cache:
+        # Get user's vessels from the database
+        db_vessels = db.query(Vessel).filter(Vessel.owner_id == current_user.id).all()
+        if not db_vessels:
             return []
-
+        
+        # Get live vessels from tracker
+        live_vessels = tracker.vessels_cache or {}
+        
         matching_vessels = []
-        for vessel in tracker.vessels_cache.values():
-            if vessel.get('is_mock', True):
-                continue
-
+        
+        # First, process the user's database vessels
+        for vessel in db_vessels:
             # Calculate match score based on vessel properties
             score = 0.0
             reason = []
 
-            # Location matching (40% of score)
-            if cargo.load_port:
-                port_coords = tracker._get_port_coordinates(cargo.load_port)
-                if port_coords and vessel.get('lat') and vessel.get('lon'):
-                    distance = tracker._calculate_distance(
-                        port_coords['lat'],
-                        port_coords['lon'],
-                        vessel['lat'],
-                        vessel['lon']
-                    )
-                    if distance <= 100:
-                        score += 0.4
-                        reason.append(f"Close to loading port ({distance:.0f} nm)")
-                    elif distance <= 300:
-                        score += 0.2
-                        reason.append(f"Within range of loading port ({distance:.0f} nm)")
-
-            # Type matching (30% of score)
-            vessel_type = vessel.get('type', '').lower()
+            # Type matching (20% of score)
+            vessel_type = vessel.vessel_type.lower() if vessel.vessel_type else ""
             cargo_type = cargo.cargo_type.lower()
+            
             if ('bulk' in vessel_type and any(t in cargo_type for t in ['coal', 'ore', 'clinker'])):
-                score += 0.3
+                score += 0.2
                 reason.append("Vessel type matches cargo")
             elif ('tanker' in vessel_type and 'oil' in cargo_type):
-                score += 0.3
+                score += 0.2
                 reason.append("Tanker suitable for liquid cargo")
             elif any(t in vessel_type for t in ['cargo', 'general']):
-                score += 0.2
+                score += 0.15
                 reason.append("General cargo vessel")
-
-            # Size matching (30% of score)
-            cargo_quantity = float(cargo.quantity) if cargo.quantity else 0
-            vessel_dwt = float(vessel.get('dwt', 0))
             
-            if vessel_dwt > 0 and cargo_quantity > 0:
-                utilization = cargo_quantity / vessel_dwt
+            # Size matching (30% of score)
+            if vessel.dwt and cargo.quantity:
+                utilization = cargo.quantity / vessel.dwt
                 if 0.5 <= utilization <= 0.95:
                     score += 0.3
                     reason.append(f"Optimal vessel size ({utilization:.0%} utilization)")
@@ -120,17 +162,44 @@ async def get_matching_vessels(cargo_id: int, db: Session = Depends(get_db)):
                 elif utilization < 1.0:
                     score += 0.1
                     reason.append(f"Vessel has sufficient capacity")
-
+            
+            # Location matching (30% of score)
+            if vessel.position and cargo.load_port:
+                port_coords = tracker._get_port_coordinates(cargo.load_port)
+                distance = None
+                
+                if port_coords:
+                    try:
+                        vessel_coords = tracker._parse_position(vessel.position)
+                        if vessel_coords and vessel_coords[0] is not None:
+                            distance = tracker._calculate_distance(
+                                port_coords['lat'],
+                                port_coords['lon'],
+                                vessel_coords[0],
+                                vessel_coords[1]
+                            )
+                            
+                            if distance <= 100:
+                                score += 0.3
+                                reason.append(f"Close to loading port ({distance:.0f} nm)")
+                            elif distance <= 300:
+                                score += 0.2
+                                reason.append(f"Within range of loading port ({distance:.0f} nm)")
+                    except Exception as e:
+                        logger.warning(f"Error calculating distance: {str(e)}")
+            
+            # Temporal matching (20% of score) - not explicitly calculated in this function
+            
             if score >= 0.3:  # Only include vessels with reasonable match score
                 matching_vessels.append({
                     "vessel": {
-                        "name": vessel.get('name', 'Unknown'),
-                        "type": vessel.get('type', 'Unknown'),
-                        "position": vessel.get('position', 'Unknown'),
-                        "status": vessel.get('status', 'Unknown'),
-                        "speed": vessel.get('speed', '0 kn'),
-                        "distance_to_load": f"{distance:.0f} nm" if 'distance' in locals() else "Unknown",
-                        "mmsi": vessel.get('mmsi', 'Unknown')
+                        "id": vessel.id,
+                        "name": vessel.name,
+                        "type": vessel.vessel_type or "Unknown",
+                        "position": vessel.position or "Unknown",
+                        "dwt": vessel.dwt or 0,
+                        "distance_to_load": f"{distance:.0f} nm" if distance else "Unknown",
+                        "source": "user_database"
                     },
                     "score": score,
                     "reason": "; ".join(reason)
@@ -140,14 +209,31 @@ async def get_matching_vessels(cargo_id: int, db: Session = Depends(get_db)):
         matching_vessels.sort(key=lambda x: x['score'], reverse=True)
         return matching_vessels[:10]
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error matching vessels: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/cargoes/{cargo_id}", response_model=CargoResponse)
-async def get_cargo(cargo_id: int, db: Session = Depends(get_db)):
+async def get_cargo(
+    cargo_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     """Get a specific cargo"""
-    cargo = db.query(Cargo).filter(Cargo.id == cargo_id).first()
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+        
+    cargo = db.query(Cargo).filter(
+        Cargo.id == cargo_id,
+        Cargo.owner_id == current_user.id
+    ).first()
+    
     if cargo is None:
         raise HTTPException(status_code=404, detail="Cargo not found")
+    
     return cargo

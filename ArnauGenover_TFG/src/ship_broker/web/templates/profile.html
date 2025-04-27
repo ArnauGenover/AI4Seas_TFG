@@ -203,46 +203,62 @@
   });
 
   // Test email connection
-  document.getElementById('testConnection').addEventListener('click', function() {
+
+document.getElementById('testConnection').addEventListener('click', function() {
     const email = document.getElementById('email_address').value;
     const password = document.getElementById('email_password').value;
     const imapServer = document.getElementById('imap_server').value;
     const statusEl = document.getElementById('connectionStatus');
     
-    if (!email || !password || !imapServer) {
-      statusEl.textContent = "Please fill in all email fields first";
-      statusEl.className = "text-sm text-red-500";
-      return;
+    if (!email || !imapServer) {
+        statusEl.textContent = "Please fill in email address and IMAP server";
+        statusEl.className = "text-sm text-red-500";
+        return;
+    }
+    
+    // If there's no new password entered but there is already a saved password
+    if (!password && document.getElementById('email_password').placeholder.includes('•••')) {
+        statusEl.textContent = "Using saved password for connection test";
+        statusEl.className = "text-sm text-yellow-500";
     }
     
     statusEl.textContent = "Testing connection...";
     statusEl.className = "text-sm text-gray-500";
     
+    // Create form data for the request
+    const formData = new FormData();
+    formData.append('email_address', email);
+    formData.append('imap_server', imapServer);
+    
+    // Only include password if provided (otherwise backend will use saved password)
+    if (password) {
+        formData.append('email_password', password);
+    }
+    
     fetch('/test-email-connection', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        email_address: email,
-        email_password: password,
-        imap_server: imapServer
-      })
+        method: 'POST',
+        body: formData
     })
-    .then(response => response.json())
+    .then(response => {
+        if (!response.ok) {
+            throw new Error(`Error: ${response.status} ${response.statusText}`);
+        }
+        return response.json();
+    })
     .then(data => {
-      if (data.status === 'success') {
-        statusEl.textContent = "✓ " + data.message;
-        statusEl.className = "text-sm text-green-500";
-      } else {
-        statusEl.textContent = "✗ " + data.message;
-        statusEl.className = "text-sm text-red-500";
-      }
+        if (data.status === 'success') {
+            statusEl.textContent = "✓ " + data.message;
+            statusEl.className = "text-sm text-green-500";
+        } else {
+            statusEl.textContent = "✗ " + data.message;
+            statusEl.className = "text-sm text-red-500";
+        }
     })
     .catch(error => {
-      statusEl.textContent = "Error testing connection: " + error;
-      statusEl.className = "text-sm text-red-500";
-    });
-  });
+        console.error('Error testing connection:', error);
+        statusEl.textContent = "Error testing connection: " + error.message;
+        statusEl.className = "text-sm text-red-500";
+      });
+});
 </script>
 {% endblock %}

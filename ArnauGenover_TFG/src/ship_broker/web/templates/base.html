@@ -22,6 +22,11 @@
                         <a href="/" class="inline-flex items-center px-1 pt-1 {% if request.url.path == '/' %}border-b-2 border-blue-500 text-blue-600 font-medium{% else %}text-gray-500 hover:text-gray-700{% endif %}">
                             Dashboard
                         </a>
+                        {% if current_user and current_user.email_address %}
+                        <a href="/my-dashboard" class="inline-flex items-center px-1 pt-1 {% if request.url.path == '/my-dashboard' %}border-b-2 border-blue-500 text-blue-600 font-medium{% else %}text-gray-500 hover:text-gray-700{% endif %}">
+                            My Dashboard
+                        </a>
+                        {% endif %}
                         <a href="/vessels" class="inline-flex items-center px-1 pt-1 {% if request.url.path == '/vessels' %}border-b-2 border-blue-500 text-blue-600 font-medium{% else %}text-gray-500 hover:text-gray-700{% endif %}">
                             Vessels
                         </a>

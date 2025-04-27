@@ -49,18 +49,22 @@ class CargoMatcher:
     def _calculate_match_score(self, vessel: Dict, cargo: Cargo) -> float:
         score = 0.0
         
-        # Size compatibility
+        # Size compatibility (30% of score)
         if cargo.quantity:
             utilization = cargo.quantity / vessel['dwt']
-            score += min(1.0, utilization) * 0.4
+            score += min(1.0, utilization) * 0.3
 
-        # Location score
+        # Location score (30% of score)
         if vessel['position'] and cargo.load_port:
             score += 0.3
 
-        # Timing score
+        # Type compatibility (20% of score)
+        # (Would need vessel type information to implement)
+            
+        # Timing score (20% of score)
         if vessel.get('eta') and cargo.laycan_start:
-            score += 0.3
+            # Implementation would go here
+            score += 0.2
 
         return min(1.0, score)
 

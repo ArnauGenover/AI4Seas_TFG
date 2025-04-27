@@ -1,0 +1,166 @@
+<!-- src/ship_broker/web/templates/my_dashboard.html -->
+{% extends "base.html" %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto">
+    <div class="mb-8">
+        <h1 class="text-3xl font-bold text-gray-900">My Personal Dashboard</h1>
+        <p class="mt-2 text-gray-600">Ships and cargoes from your personal email: {{ current_user.email_address }}</p>
+    </div>
+
+    <!-- Stats Overview -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-lg font-medium text-gray-900">My Vessels</h3>
+            <p class="text-3xl font-bold text-blue-600" id="vessels-count">0</p>
+            <p class="text-sm text-gray-500 mt-2">Vessels from your emails</p>
+        </div>
+        
+        <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-lg font-medium text-gray-900">My Cargoes</h3>
+            <p class="text-3xl font-bold text-green-600" id="cargoes-count">0</p>
+            <p class="text-sm text-gray-500 mt-2">Cargoes from your emails</p>
+        </div>
+
+        <div class="bg-white rounded-lg shadow p-6">
+            <h3 class="text-lg font-medium text-gray-900">Email Status</h3>
+            <p class="text-lg font-medium text-gray-600" id="email-status">
+                {% if current_user.email_address and current_user.encrypted_email_password %}
+                    <span class="text-green-500">✓ Connected</span>
+                {% else %}
+                    <span class="text-red-500">✗ Not configured</span>
+                {% endif %}
+            </p>
+            <button onclick="processEmails()" class="mt-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600">
+                Process My Emails
+            </button>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- My Vessels -->
+        <div class="bg-white rounded-lg shadow">
+            <div class="p-6 border-b border-gray-200">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-xl font-semibold text-gray-900">My Vessels</h2>
+                    <a href="/vessels?filter=mine" class="text-blue-600 hover:text-blue-800">View all</a>
+                </div>
+            </div>
+            <div class="p-6">
+                <div class="space-y-4" id="my-vessels">
+                    <div class="animate-pulse">
+                        <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- My Cargoes -->
+        <div class="bg-white rounded-lg shadow">
+            <div class="p-6 border-b border-gray-200">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-xl font-semibold text-gray-900">My Cargoes</h2>
+                    <a href="/cargoes?filter=mine" class="text-blue-600 hover:text-blue-800">View all</a>
+                </div>
+            </div>
+            <div class="p-6">
+                <div class="space-y-4" id="my-cargoes">
+                    <div class="animate-pulse">
+                        <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+function updateDashboard() {
+    // Update vessels
+    fetch('/api/v1/vessels/my-vessels')
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('vessels-count').textContent = data.length;
+            
+            const myVessels = document.getElementById('my-vessels');
+            myVessels.innerHTML = '';
+            
+            data.slice(0, 5).forEach(vessel => {
+                const div = document.createElement('div');
+                div.className = 'flex justify-between items-center p-2 hover:bg-gray-50 rounded';
+                div.innerHTML = `
+                    <div>
+                        <h3 class="font-medium">${vessel.name}</h3>
+                        <p class="text-sm text-gray-500">${vessel.vessel_type || 'N/A'}</p>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-sm font-medium">${vessel.position || 'N/A'}</p>
+                        <p class="text-sm text-gray-500">${vessel.dwt ? vessel.dwt.toLocaleString() + ' DWT' : 'N/A'}</p>
+                    </div>
+                `;
+                myVessels.appendChild(div);
+            });
+            
+            if (data.length === 0) {
+                myVessels.innerHTML = '<p class="text-center text-gray-500">No vessels found in your emails</p>';
+            }
+        });
+
+    // Update cargoes
+    fetch('/api/v1/cargoes/my-cargoes')
+        .then(response => response.json())
+        .then(data => {
+            document.getElementById('cargoes-count').textContent = data.length;
+            
+            const myCargoes = document.getElementById('my-cargoes');
+            myCargoes.innerHTML = '';
+            
+            data.slice(0, 5).forEach(cargo => {
+                const div = document.createElement('div');
+                div.className = 'flex justify-between items-center p-2 hover:bg-gray-50 rounded';
+                div.innerHTML = `
+                    <div>
+                        <h3 class="font-medium">${cargo.cargo_type}</h3>
+                        <p class="text-sm text-gray-500">${cargo.quantity ? cargo.quantity.toLocaleString() + ' MT' : 'N/A'}</p>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-sm font-medium">${cargo.load_port || 'N/A'} → ${cargo.discharge_port || 'N/A'}</p>
+                        <p class="text-sm text-gray-500">${cargo.rate || 'Rate N/A'}</p>
+                    </div>
+                `;
+                myCargoes.appendChild(div);
+            });
+            
+            if (data.length === 0) {
+                myCargoes.innerHTML = '<p class="text-center text-gray-500">No cargoes found in your emails</p>';
+            }
+        });
+}
+
+function processEmails() {
+    const button = event.target;
+    button.disabled = true;
+    button.textContent = 'Processing...';
+    
+    fetch('/api/v1/process-emails/', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            updateDashboard();
+            button.textContent = 'Process My Emails';
+            button.disabled = false;
+            alert(data.message);
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            button.textContent = 'Error - Try Again';
+            button.disabled = false;
+        });
+}
+
+// Initial load
+updateDashboard();
+
+// Refresh every 60 seconds
+setInterval(updateDashboard, 60000);
+</script>
+{% endblock %}

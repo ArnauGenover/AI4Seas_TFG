@@ -11,111 +11,124 @@ logger = logging.getLogger(__name__)
 class OpenAIHelper:
     def __init__(self):
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        self.model = "gpt-4-turbo-preview"
+        self.model = "gpt-3.5-turbo"  # better this model for testing purposes
+        # paid version self.model = "gpt-4-turbo-preview"
         self.current_year = datetime.now().year
+
+    # Update extract_info in src/ship_broker/core/openai_helper.py
 
     def extract_info(self, content: str) -> Dict:
         """
         Extract both vessel and cargo information from email content using OpenAI.
         Returns a dictionary with 'vessels' and 'cargoes' lists.
+        Falls back to an empty result if the API quota is exceeded.
         """
-        system_prompt = self.get_system_prompt()
-        prompt = f"""You are a shipping expert. Extract all vessel and cargo information from this email.
-        Pay special attention to:
-        1. If email mentions "PROPOSE SUITABLE CARGOES" or similar, treat vessels mentioned as cargo opportunities
-        2. Look for quantity information (DWT, MTS, DWCC)
-        3. Look for location and date information after "OPEN"
-        4. Identify vessel equipment like cranes, capacity, etc.
-        5. For dates, if only day-month is provided (e.g., "07-11"), assume it's in the near future
-        
-        Return ONLY a JSON object with this structure:
-        {{
-            "vessels": [
-                {{
-                    "name": "vessel name",
-                    "dwt": numeric value only,
-                    "position": "current position",
-                    "vessel_type": "type of vessel",
-                    "eta": "DD-MM",
-                    "open_date": "DD-MM",
-                    "description": "additional details including equipment"
-                }}
-            ],
-            "cargoes": [
-                {{
-                    "cargo_type": "type of cargo or vessel name if it's a cargo opportunity",
-                    "quantity": numeric value only in MT,
-                    "load_port": "loading port name or open position",
-                    "discharge_port": "discharge port if mentioned",
-                    "laycan_start": "DD-MM",
-                    "laycan_end": "DD-MM",
-                    "rate": "rate if mentioned",
-                    "description": "full original text and details"
-                }}
-            ]
-        }}
-
-        Email content:
-        {content}
-        """
-
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={ "type": "json_object" }
-            )
+            system_prompt = self.get_system_prompt()
+            prompt = f"""You are a shipping expert. Extract all vessel and cargo information from this email.
+            Pay special attention to:
+            1. If email mentions "PROPOSE SUITABLE CARGOES" or similar, treat vessels mentioned as cargo opportunities
+            2. Look for quantity information (DWT, MTS, DWCC)
+            3. Look for location and date information after "OPEN"
+            4. Identify vessel equipment like cranes, capacity, etc.
+            5. For dates, if only day-month is provided (e.g., "07-11"), assume it's in the near future
             
+            Return ONLY a JSON object with this structure:
+            {{
+                "vessels": [
+                    {{
+                        "name": "vessel name",
+                        "dwt": numeric value only,
+                        "position": "current position",
+                        "vessel_type": "type of vessel",
+                        "eta": "DD-MM",
+                        "open_date": "DD-MM",
+                        "description": "additional details including equipment"
+                    }}
+                ],
+                "cargoes": [
+                    {{
+                        "cargo_type": "type of cargo or vessel name if it's a cargo opportunity",
+                        "quantity": numeric value only in MT,
+                        "load_port": "loading port name or open position",
+                        "discharge_port": "discharge port if mentioned",
+                        "laycan_start": "DD-MM",
+                        "laycan_end": "DD-MM",
+                        "rate": "rate if mentioned",
+                        "description": "full original text and details"
+                    }}
+                ]
+            }}
+
+            Email content:
+            {content}
+            """
+
             try:
-                # Extract the JSON content from the response
-                result = json.loads(response.choices[0].message.content)
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={ "type": "json_object" }
+                )
                 
-                # Process and standardize the results
-                processed_result = {
-                    'vessels': [],
-                    'cargoes': []
-                }
+                try:
+                    # Extract the JSON content from the response
+                    result = json.loads(response.choices[0].message.content)
+                    
+                    # Process and standardize the results
+                    processed_result = {
+                        'vessels': [],
+                        'cargoes': []
+                    }
 
-                # Process vessels
-                for vessel in result.get('vessels', []):
-                    if vessel.get('name'):
-                        processed_result['vessels'].append({
-                            'name': vessel.get('name'),
-                            'dwt': vessel.get('dwt'),
-                            'position': vessel.get('position'),
-                            'vessel_type': vessel.get('vessel_type'),
-                            'eta': self.standardize_date(vessel.get('eta')),
-                            'open_date': self.standardize_date(vessel.get('open_date')),
-                            'description': vessel.get('description')
-                        })
+                    # Process vessels
+                    for vessel in result.get('vessels', []):
+                        if vessel.get('name'):
+                            processed_result['vessels'].append({
+                                'name': vessel.get('name'),
+                                'dwt': vessel.get('dwt'),
+                                'position': vessel.get('position'),
+                                'vessel_type': vessel.get('vessel_type'),
+                                'eta': self.standardize_date(vessel.get('eta')),
+                                'open_date': self.standardize_date(vessel.get('open_date')),
+                                'description': vessel.get('description')
+                            })
 
-                # Process cargoes
-                for cargo in result.get('cargoes', []):
-                    if cargo.get('cargo_type'):
-                        processed_result['cargoes'].append({
-                            'cargo_type': cargo.get('cargo_type'),
-                            'quantity': cargo.get('quantity'),
-                            'load_port': cargo.get('load_port'),
-                            'discharge_port': cargo.get('discharge_port'),
-                            'laycan_start': self.standardize_date(cargo.get('laycan_start')),
-                            'laycan_end': self.standardize_date(cargo.get('laycan_end')),
-                            'rate': cargo.get('rate'),
-                            'description': cargo.get('description')
-                        })
+                    # Process cargoes
+                    for cargo in result.get('cargoes', []):
+                        if cargo.get('cargo_type'):
+                            processed_result['cargoes'].append({
+                                'cargo_type': cargo.get('cargo_type'),
+                                'quantity': cargo.get('quantity'),
+                                'load_port': cargo.get('load_port'),
+                                'discharge_port': cargo.get('discharge_port'),
+                                'laycan_start': self.standardize_date(cargo.get('laycan_start')),
+                                'laycan_end': self.standardize_date(cargo.get('laycan_end')),
+                                'rate': cargo.get('rate'),
+                                'description': cargo.get('description')
+                            })
 
-                return processed_result
+                    return processed_result
 
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse JSON from OpenAI response: {str(e)}")
-                logger.error(f"Raw response was: {response.choices[0].message.content}")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON from OpenAI response: {str(e)}")
+                    logger.error(f"Raw response was: {response.choices[0].message.content}")
+                    return {'vessels': [], 'cargoes': []}
+
+            except Exception as e:
+                if "429" in str(e) or "quota" in str(e).lower():
+                    logger.warning("OpenAI quota exceeded - falling back to regex parsing")
+                else:
+                    logger.error(f"Error using OpenAI: {str(e)}")
                 return {'vessels': [], 'cargoes': []}
 
         except Exception as e:
-            logger.error(f"Error using OpenAI: {str(e)}")
+            logger.error(f"Error in extract_info: {str(e)}")
             return {'vessels': [], 'cargoes': []}
+
 
     def standardize_date(self, date_str: Optional[str]) -> Optional[datetime]:
         """Convert various date formats to datetime objects with smart future date handling."""

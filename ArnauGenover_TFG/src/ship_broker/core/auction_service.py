@@ -1,10 +1,10 @@
 # src/ship_broker/core/auction_service.py
 
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import logging
 from sqlalchemy.orm import Session
-from .database import Vessel, Auction, AuctionStatus
+from .database import Vessel, Auction, AuctionStatus, AuctionBid, User
 
 logger = logging.getLogger(__name__)
 
@@ -12,13 +12,19 @@ class AuctionService:
     def __init__(self, db: Session):
         self.db = db
     
-    def get_active_auctions(self) -> List[Auction]:
-        """Get all active auctions"""
+    def get_active_auctions(self, user_id: Optional[int] = None) -> List[Auction]:
+        """Get all active auctions, optionally filtered by user_id"""
         try:
-            return self.db.query(Auction).filter(
+            query = self.db.query(Auction).filter(
                 Auction.status == AuctionStatus.ACTIVE,
                 Auction.end_date > datetime.utcnow()
-            ).all()
+            )
+            
+            # Filter by user_id if provided
+            if user_id is not None:
+                query = query.filter(Auction.owner_id == user_id)
+                
+            return query.all()
         except Exception as e:
             logger.error(f"Error getting active auctions: {str(e)}")
             return []
@@ -30,10 +36,10 @@ class AuctionService:
         duration_days = 15  # Standard auction duration
 
         # Adjust prices based on vessel size
-        if vessel.dwt > 100000:  # Large vessels
+        if vessel.dwt and vessel.dwt > 100000:  # Large vessels
             start_price = base_price * 1.2
             min_price = base_price * 0.6
-        elif vessel.dwt > 50000:  # Medium vessels
+        elif vessel.dwt and vessel.dwt > 50000:  # Medium vessels
             start_price = base_price * 1.1
             min_price = base_price * 0.55
         else:  # Small vessels
@@ -50,7 +56,7 @@ class AuctionService:
             "duration_days": duration_days
         }
     
-    def create_auction_for_vessel(self, vessel_id: int) -> Optional[Auction]:
+    def create_auction_for_vessel(self, vessel_id: int, user_id: Optional[int] = None) -> Optional[Auction]:
         """Create a new auction for a vessel"""
         try:
             # Get and validate vessel
@@ -59,8 +65,13 @@ class AuctionService:
                 logger.error(f"No vessel found with ID {vessel_id}")
                 return None
 
-            if not vessel.dwt:
-                logger.error(f"Vessel {vessel_id} has no DWT specified")
+            # If user_id not provided, use vessel's owner_id
+            if user_id is None and vessel.owner_id:
+                user_id = vessel.owner_id
+                
+            # Make sure we have a user_id
+            if not user_id:
+                logger.error(f"No user_id provided for auction creation and vessel {vessel_id} has no owner_id")
                 return None
 
             # Check for existing active auction
@@ -83,14 +94,15 @@ class AuctionService:
                 vessel_id=vessel.id,
                 start_date=start_date,
                 end_date=end_date,
-                space_mt=vessel.dwt,
+                space_mt=vessel.dwt if vessel.dwt else 50000,  # Default to 50k if no DWT
                 space_sold_mt=0.0,
                 start_price=params["start_price"],
                 current_price=params["start_price"],
                 min_price=params["min_price"],
                 daily_reduction=params["daily_reduction"],
                 status=AuctionStatus.ACTIVE,
-                last_updated=start_date
+                last_updated=start_date,
+                owner_id=user_id  # Set owner_id to user_id
             )
 
             self.db.add(auction)
@@ -178,9 +190,95 @@ class AuctionService:
                 "vessel_type": auction.vessel.vessel_type if auction.vessel else "Unknown",
                 "start_date": auction.start_date.isoformat() if auction.start_date else None,
                 "end_date": auction.end_date.isoformat() if auction.end_date else None,
-                "last_updated": auction.last_updated.isoformat() if auction.last_updated else None
+                "last_updated": auction.last_updated.isoformat() if auction.last_updated else None,
+                "owner_id": auction.owner_id
             }
             
         except Exception as e:
             logger.error(f"Error getting auction statistics for auction {auction_id}: {str(e)}")
             return {}
+    
+    def place_bid(self, auction_id: int, bidder_id: int, bid_space_mt: float) -> Dict[str, Any]:
+        """Place a bid on an auction"""
+        try:
+            # Get the auction
+            auction = self.db.query(Auction).filter(
+                Auction.id == auction_id,
+                Auction.status == AuctionStatus.ACTIVE
+            ).first()
+            
+            if not auction:
+                return {"success": False, "message": "Auction not found or not active"}
+                
+            # Check if bidder exists
+            bidder = self.db.query(User).filter(User.id == bidder_id).first()
+            if not bidder:
+                return {"success": False, "message": "Bidder not found"}
+                
+            # Check if space is available
+            available_space = auction.space_mt - auction.space_sold_mt
+            if bid_space_mt > available_space:
+                return {
+                    "success": False, 
+                    "message": f"Not enough space available. Requested: {bid_space_mt} MT, Available: {available_space} MT"
+                }
+                
+            # Create the bid
+            bid = AuctionBid(
+                auction_id=auction_id,
+                bidder_id=bidder_id,
+                bid_space_mt=bid_space_mt,
+                sale_price=auction.current_price,
+                sold_at=datetime.utcnow()
+            )
+            
+            # Update auction sold space
+            auction.space_sold_mt += bid_space_mt
+            
+            # If all space sold, complete the auction
+            if auction.space_sold_mt >= auction.space_mt * 0.999:
+                auction.status = AuctionStatus.COMPLETED
+                logger.info(f"Auction {auction.id} completed as all space is sold")
+                
+            self.db.add(bid)
+            self.db.commit()
+            
+            return {
+                "success": True,
+                "message": f"Successfully placed bid for {bid_space_mt} MT at USD {auction.current_price}/MT",
+                "bid_id": bid.id,
+                "remaining_space": auction.space_mt - auction.space_sold_mt
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to place bid: {str(e)}")
+            self.db.rollback()
+            return {"success": False, "message": f"Error placing bid: {str(e)}"}
+            
+    def get_user_bids(self, user_id: int) -> List[Dict[str, Any]]:
+        """Get all bids placed by a user"""
+        try:
+            bids = self.db.query(AuctionBid).filter(
+                AuctionBid.bidder_id == user_id
+            ).all()
+            
+            result = []
+            for bid in bids:
+                auction = self.db.query(Auction).filter(Auction.id == bid.auction_id).first()
+                vessel = self.db.query(Vessel).filter(Vessel.id == auction.vessel_id).first() if auction else None
+                
+                result.append({
+                    "bid_id": bid.id,
+                    "auction_id": bid.auction_id,
+                    "vessel_name": vessel.name if vessel else "Unknown",
+                    "bid_space_mt": bid.bid_space_mt,
+                    "sale_price": bid.sale_price,
+                    "sold_at": bid.sold_at,
+                    "auction_status": auction.status.value if auction else "unknown"
+                })
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to get user bids: {str(e)}")
+            return []
