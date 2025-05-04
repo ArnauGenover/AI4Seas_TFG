@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
 from datetime import datetime
 import logging
+from sqlalchemy import or_  # Add this import
 
 from ...core.database import Cargo, Vessel
 from ...core.schemas import CargoCreate, CargoResponse
@@ -22,6 +23,7 @@ router = APIRouter()
 async def get_cargoes(
     skip: int = 0,
     limit: int = 100,
+    include_system: bool = True,  # New parameter
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -33,10 +35,30 @@ async def get_cargoes(
                 detail="Authentication required"
             )
             
-        cargoes = db.query(Cargo).filter(
-            Cargo.owner_id == current_user.id
-        ).order_by(Cargo.created_at.desc()).offset(skip).limit(limit).all()
+        # Base query for user-owned cargoes
+        if include_system:
+            # Include both user's cargoes and system cargoes (owner_id is NULL)
+            logger.info(f"Including system cargoes for user {current_user.id}")
+            query = db.query(Cargo).filter(
+                or_(
+                    Cargo.owner_id == current_user.id,
+                    Cargo.owner_id == None
+                )
+            )
+        else:
+            # Only include user's own cargoes
+            logger.info(f"Only querying cargoes for user {current_user.id}")
+            query = db.query(Cargo).filter(
+                Cargo.owner_id == current_user.id
+            )
+            
+        cargoes = query.order_by(Cargo.created_at.desc()).offset(skip).limit(limit).all()
+        logger.info(f"Found {len(cargoes)} cargoes (include_system={include_system})")
         
+        # Debug log cargo details
+        for c in cargoes:
+            logger.info(f"Cargo: {c.cargo_type}, quantity: {c.quantity}, owner_id: {c.owner_id}")
+            
         return cargoes
     except HTTPException:
         raise
@@ -95,7 +117,6 @@ async def get_my_cargoes(
     
     cargoes = db.query(Cargo).filter(Cargo.owner_id == current_user.id).all()
     return cargoes
-
 
 @router.get("/cargoes/match/{cargo_id}/vessels", response_model=List[Dict])
 async def get_matching_vessels(

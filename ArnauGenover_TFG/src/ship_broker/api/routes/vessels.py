@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
 from datetime import datetime
 import logging
+from sqlalchemy import or_  # Add this import
 
 from ...core.database import Vessel, Cargo
 from ...core.schemas import Vessel as VesselSchema
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 async def get_vessels(
     skip: int = 0,
     limit: int = 100,
+    include_system: bool = True,  # New parameter
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -32,13 +34,29 @@ async def get_vessels(
                 detail="Authentication required"
             )
         
-        vessels = db.query(Vessel).filter(
-            Vessel.owner_id == current_user.id
-        ).offset(skip).limit(limit).all()
+        # Include system vessels if requested
+        if include_system:
+            vessels = db.query(Vessel).filter(
+                or_(
+                    Vessel.owner_id == current_user.id,
+                    Vessel.owner_id == None
+                )
+            ).offset(skip).limit(limit).all()
+            logger.info(f"Including system vessels for user {current_user.id}")
+        else:
+            # Only user's vessels
+            vessels = db.query(Vessel).filter(
+                Vessel.owner_id == current_user.id
+            ).offset(skip).limit(limit).all()
+            logger.info(f"Only querying vessels for user {current_user.id}")
         
+        logger.info(f"Found {len(vessels)} vessels (include_system={include_system})")
+        
+        # Debug log vessel details
+        for v in vessels:
+            logger.info(f"Vessel: {v.name}, owner_id: {v.owner_id}")
+            
         return vessels
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"Error getting vessels: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -57,9 +75,6 @@ async def get_my_vessels(
     
     vessels = db.query(Vessel).filter(Vessel.owner_id == current_user.id).all()
     return vessels
-
-
-
 
 @router.get("/vessels/match/{vessel_id}/cargoes", response_model=List[Dict])
 async def get_matching_cargoes(

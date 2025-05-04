@@ -22,19 +22,34 @@ class VesselTracker:
         self.vessels_cache = {}
         self.last_update = datetime.now()
         self._running = False
-        
+
     async def start_tracking(self):
         """Start vessel tracking"""
         if self._running:
             return
-            
+                
         self._running = True
+        max_retries = 3  # Limit retries when the service is unavailable
+        retry_count = 0
+        
         while self._running:
             try:
                 await self.connect_ais_stream()
+                # Reset retry count after successful connection
+                retry_count = 0
             except Exception as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    logger.error(f"AIS stream connection failed after {max_retries} attempts. Stopping retries.")
+                    self._running = False
+                    return
+                    
                 logger.error(f"AIS stream connection error: {str(e)}")
-                await asyncio.sleep(5)  # Wait before reconnecting
+                # Exponential backoff with a cap
+                wait_time = min(30, 2 ** retry_count)
+                logger.info(f"Waiting {wait_time} seconds before reconnecting...")
+                await asyncio.sleep(wait_time)
+
         
     async def stop_tracking(self):
         """Stop vessel tracking"""

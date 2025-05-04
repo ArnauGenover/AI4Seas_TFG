@@ -8,6 +8,9 @@ from ...core.email_parser import EmailParser
 from ...core.database import Vessel, Cargo
 from ...config import Settings, get_settings
 from ..dependencies import get_db
+from ...core.database import Vessel, Cargo
+from ..dependencies import get_db
+
 
 # Initialize router and logger
 router = APIRouter()
@@ -237,3 +240,96 @@ async def test_email_parsing(settings: Settings = Depends(get_settings)):
             "status": "error",
             "message": str(e)
         }
+
+
+@router.get("/test/create-system-data")
+async def create_system_data(db: Session = Depends(get_db)):
+    """Create sample system-level vessels and cargoes"""
+    try:
+        # Sample system vessel
+        system_vessel = Vessel(
+            name="SYSTEM TEST VESSEL",
+            dwt=75000.0,
+            position="TEST PORT",
+            vessel_type="BULK CARRIER",
+            description="This is a system test vessel",
+            owner_id=None  # Explicitly set to None
+        )
+        db.add(system_vessel)
+        
+        # Sample system cargo
+        system_cargo = Cargo(
+            cargo_type="SYSTEM TEST CARGO",
+            quantity=50000.0,
+            load_port="TEST LOAD PORT",
+            discharge_port="TEST DISCHARGE PORT",
+            description="This is a system test cargo",
+            owner_id=None  # Explicitly set to None
+        )
+        db.add(system_cargo)
+        
+        db.commit()
+        return {"message": "System test data created successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating system test data: {str(e)}")
+        return {"error": str(e)}
+
+
+@router.get("/test/create-system-data")
+async def create_system_data(db: Session = Depends(get_db)):
+    """Create sample system-level vessels and cargoes"""
+    try:
+        # Sample system vessel
+        system_vessel = Vessel(
+            name="SYSTEM TEST VESSEL",
+            dwt=75000.0,
+            position="TEST PORT",
+            vessel_type="BULK CARRIER",
+            description="This is a system test vessel",
+            owner_id=None  # Explicitly set to None
+        )
+        db.add(system_vessel)
+        
+        # Sample system cargo
+        system_cargo = Cargo(
+            cargo_type="SYSTEM TEST CARGO",
+            quantity=50000.0,
+            load_port="TEST LOAD PORT",
+            discharge_port="TEST DISCHARGE PORT",
+            description="This is a system test cargo",
+            owner_id=None  # Explicitly set to None
+        )
+        db.add(system_cargo)
+        
+        db.commit()
+        return {"message": "System test data created successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error creating system test data: {str(e)}")
+        return {"error": str(e)}
+
+
+
+@router.get("/test/check-system-data")
+async def check_system_data(db: Session = Depends(get_db)):
+    """Check for system-level data (owner_id=None)"""
+    try:
+        system_vessels = db.query(Vessel).filter(Vessel.owner_id == None).all()
+        system_cargoes = db.query(Cargo).filter(Cargo.owner_id == None).all()
+        
+        return {
+            "system_vessels_count": len(system_vessels),
+            "system_vessels": [
+                {"id": v.id, "name": v.name, "owner_id": v.owner_id} 
+                for v in system_vessels
+            ],
+            "system_cargoes_count": len(system_cargoes),
+            "system_cargoes": [
+                {"id": c.id, "cargo_type": c.cargo_type, "owner_id": c.owner_id} 
+                for c in system_cargoes
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error checking system data: {str(e)}")
+        return {"error": str(e)}

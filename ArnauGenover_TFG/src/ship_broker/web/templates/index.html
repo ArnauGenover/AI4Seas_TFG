@@ -107,8 +107,8 @@ function checkEmailConfiguration() {
 }
 
 function updateDashboard() {
-    // Update vessels
-    fetch('/api/v1/vessels/')
+    // Update vessels with system data
+    fetch('/api/v1/vessels/?include_system=true')
         .then(response => response.json())
         .then(data => {
             document.getElementById('vessels-count').textContent = data.length;
@@ -138,8 +138,8 @@ function updateDashboard() {
             });
         });
 
-    // Update cargoes
-    fetch('/api/v1/cargoes/')
+    // Update cargoes with system data
+    fetch('/api/v1/cargoes/?include_system=true')
         .then(response => response.json())
         .then(data => {
             document.getElementById('cargoes-count').textContent = data.length;
