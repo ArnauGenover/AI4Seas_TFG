@@ -76,6 +76,9 @@ async def get_my_vessels(
     vessels = db.query(Vessel).filter(Vessel.owner_id == current_user.id).all()
     return vessels
 
+
+# In vessels.py - update the get_matching_cargoes method
+
 @router.get("/vessels/match/{vessel_id}/cargoes", response_model=List[Dict])
 async def get_matching_cargoes(
     vessel_id: int, 
@@ -90,17 +93,28 @@ async def get_matching_cargoes(
                 detail="Authentication required"
             )
             
-        # Get the vessel and verify ownership
+        # Get the vessel and verify ownership or system access
         vessel = db.query(Vessel).filter(
-            Vessel.id == vessel_id,
-            Vessel.owner_id == current_user.id
+            and_(
+                Vessel.id == vessel_id,
+                or_(
+                    Vessel.owner_id == current_user.id,
+                    Vessel.owner_id == None
+                )
+            )
         ).first()
         
         if not vessel:
             raise HTTPException(status_code=404, detail="Vessel not found")
             
-        # Get all active cargoes for this user
-        cargoes = db.query(Cargo).filter(Cargo.owner_id == current_user.id).all()
+        # Get all active cargoes for this user and system cargoes
+        cargoes = db.query(Cargo).filter(
+            or_(
+                Cargo.owner_id == current_user.id,
+                Cargo.owner_id == None
+            )
+        ).all()
+        
         matching_cargoes = []
         
         for cargo in cargoes:
@@ -108,56 +122,8 @@ async def get_matching_cargoes(
             score = 0.0
             reason = []
             
-            # Type matching (20% of score)
-            vessel_type = vessel.vessel_type.lower() if vessel.vessel_type else ""
-            cargo_type = cargo.cargo_type.lower()
-            
-            if ('bulk' in vessel_type and any(t in cargo_type for t in ['coal', 'ore', 'clinker'])):
-                score += 0.2
-                reason.append("Vessel type suitable for bulk cargo")
-            elif ('tanker' in vessel_type and 'oil' in cargo_type):
-                score += 0.2
-                reason.append("Tanker suitable for liquid cargo")
-            elif any(t in vessel_type for t in ['cargo', 'general']):
-                score += 0.15
-                reason.append("General cargo vessel")
-            
-            # Size matching (30% of score)
-            if vessel.dwt and cargo.quantity:
-                utilization = cargo.quantity / vessel.dwt
-                if 0.5 <= utilization <= 0.95:
-                    score += 0.3
-                    reason.append(f"Optimal cargo size ({utilization:.0%} utilization)")
-                elif 0.3 <= utilization < 0.5:
-                    score += 0.2
-                    reason.append(f"Acceptable cargo size ({utilization:.0%} utilization)")
-                
-            # Location matching (30% of score)
-            if vessel.position and cargo.load_port:
-                port_coords = tracker._get_port_coordinates(cargo.load_port)
-                if port_coords:
-                    try:
-                        vessel_coords = tracker._parse_position(vessel.position)
-                        if vessel_coords and vessel_coords[0] is not None:
-                            distance = tracker._calculate_distance(
-                                port_coords['lat'],
-                                port_coords['lon'],
-                                vessel_coords[0],
-                                vessel_coords[1]
-                            )
-                            if distance <= 100:
-                                score += 0.3
-                                reason.append(f"Close to loading port ({distance:.0f} nm)")
-                            elif distance <= 300:
-                                score += 0.2
-                                reason.append(f"Within range of loading port ({distance:.0f} nm)")
-                            elif distance <= 500:
-                                score += 0.1
-                                reason.append(f"Distant from loading port ({distance:.0f} nm)")
-                    except Exception as e:
-                        logger.warning(f"Error calculating distance: {str(e)}")
-            
-            # Temporal matching (20% of score) - not explicitly calculated in this function
+            # Matching logic here...
+            # [Keep your existing matching logic]
             
             if score >= 0.3:  # Only include good matches
                 matching_cargoes.append({
@@ -184,6 +150,7 @@ async def get_matching_cargoes(
     except Exception as e:
         logger.error(f"Error matching cargoes: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/vessels/{vessel_id}", response_model=VesselSchema)
 async def get_vessel(

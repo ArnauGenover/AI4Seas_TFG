@@ -53,6 +53,9 @@ async def process_user_emails(
         logger.error(f"Email processing failed for user_id {user_id}: {str(e)}")
 
 
+
+
+
 @router.post("/process-emails/")
 async def process_emails(
     request: Request,
@@ -70,7 +73,8 @@ async def process_emails(
                 email_address=current_user.email_address,
                 password=current_user.get_email_password(),
                 db=db,
-                imap_server=current_user.imap_server
+                imap_server=current_user.imap_server,
+                user_id=current_user.id  # Make sure to pass the user_id here
             )
             owner_id = current_user.id
         else:
@@ -87,9 +91,10 @@ async def process_emails(
                 email_address=settings.EMAIL_ADDRESS,
                 password=settings.EMAIL_PASSWORD,
                 db=db,
-                imap_server=settings.IMAP_SERVER
+                imap_server=settings.IMAP_SERVER,
+                user_id=current_user.id if current_user else None  # Use current user if available
             )
-            owner_id = None  # System-owned content
+            owner_id = current_user.id if current_user else None  # Use current user if available
         
         # Process emails
         emails = parser.get_emails(days=1)
@@ -123,6 +128,7 @@ async def process_emails(
             status_code=500,
             detail=str(e)
         )
+
 
 @router.get("/email-stats")
 async def get_email_stats(

@@ -332,4 +332,4 @@ async def check_system_data(db: Session = Depends(get_db)):
         }
     except Exception as e:
         logger.error(f"Error checking system data: {str(e)}")
-        return {"error": str(e)}
+        return {"error": str(e)}    

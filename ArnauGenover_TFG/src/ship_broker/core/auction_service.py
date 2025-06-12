@@ -56,8 +56,9 @@ class AuctionService:
             "duration_days": duration_days
         }
     
+
     def create_auction_for_vessel(self, vessel_id: int, user_id: Optional[int] = None) -> Optional[Auction]:
-        """Create a new auction for a vessel"""
+        """Create a new auction for a vessel with improved user_id handling"""
         try:
             # Get and validate vessel
             vessel = self.db.query(Vessel).filter(Vessel.id == vessel_id).first()
@@ -65,13 +66,27 @@ class AuctionService:
                 logger.error(f"No vessel found with ID {vessel_id}")
                 return None
 
+            # Get a valid user_id
+            current_user_id = user_id
+            
             # If user_id not provided, use vessel's owner_id
-            if user_id is None and vessel.owner_id:
-                user_id = vessel.owner_id
+            if current_user_id is None and vessel.owner_id:
+                current_user_id = vessel.owner_id
                 
+            # If still no user_id, try to get the first available admin or system user
+            if current_user_id is None:
+                system_user = self.db.query(User).filter(User.username == "system").first()
+                if system_user:
+                    current_user_id = system_user.id
+                else:
+                    # Get first admin user or any user if no admin
+                    admin_user = self.db.query(User).first()
+                    if admin_user:
+                        current_user_id = admin_user.id
+            
             # Make sure we have a user_id
-            if not user_id:
-                logger.error(f"No user_id provided for auction creation and vessel {vessel_id} has no owner_id")
+            if not current_user_id:
+                logger.warning(f"No user_id for auction creation - using vessel without auction")
                 return None
 
             # Check for existing active auction
@@ -102,7 +117,7 @@ class AuctionService:
                 daily_reduction=params["daily_reduction"],
                 status=AuctionStatus.ACTIVE,
                 last_updated=start_date,
-                owner_id=user_id  # Set owner_id to user_id
+                owner_id=current_user_id  # Set owner_id to user_id
             )
 
             self.db.add(auction)
@@ -116,6 +131,7 @@ class AuctionService:
             logger.error(f"Error creating auction for vessel {vessel_id}: {str(e)}")
             self.db.rollback()
             return None
+            
 
     def update_auction_prices(self):
         """Update current prices for all active auctions"""

@@ -201,8 +201,9 @@ class EmailParser:
                 content = email_message.get_payload()
         return content
 
+
     def process_and_store_email(self, email_data: Union[str, Dict]) -> Tuple[List[Cargo], List[Vessel]]:
-        """Process email content and store results in database"""
+        """Process email content and store results in database with improved duplicate detection"""
         cargoes = []
         vessels = []
         user_id = None
@@ -216,40 +217,110 @@ class EmailParser:
             content = email_data['content'] if isinstance(email_data, dict) else email_data
 
             # First try regex-based parsing as the primary method
-            vessels = self.extract_vessels(content)
-            cargoes = self.extract_cargoes(content)
+            regex_vessels = self.extract_vessels(content)
+            regex_cargoes = self.extract_cargoes(content)
             
-            # Only try AI if regex didn't find anything and AI is available
-            if (not vessels or not cargoes) and self.use_ai:
+            # Keep track of vessel names to avoid duplicates
+            vessel_names = set()
+            
+            # Add regex vessels first
+            for vessel in regex_vessels:
+                # Normalize vessel name to avoid duplicates like "MV NAME" vs "NAME"
+                normalized_name = self._normalize_vessel_name(vessel.name)
+                if normalized_name not in vessel_names:
+                    vessel_names.add(normalized_name)
+                    vessels.append(vessel)
+            
+            # If we didn't find enough data with regex, try AI
+            if (len(vessels) < 1 or len(regex_cargoes) < 1) and self.use_ai:
                 try:
                     ai_results = self.ai.extract_info(content)
                     if ai_results:
                         # Process vessels from AI
                         for vessel_data in ai_results.get('vessels', []):
                             try:
-                                vessel = VesselData(**vessel_data)
-                                if not any(v.name == vessel.name for v in vessels):  # Avoid duplicates
+                                normalized_name = self._normalize_vessel_name(vessel_data.get('name', ''))
+                                if normalized_name and normalized_name not in vessel_names:
+                                    vessel = VesselData(**vessel_data)
+                                    vessel_names.add(normalized_name)
                                     vessels.append(vessel)
                             except Exception as e:
                                 logger.error(f"Failed to process AI vessel: {str(e)}")
 
-                        # Process cargoes from AI
-                        for cargo_data in ai_results.get('cargoes', []):
-                            try:
-                                cargo = CargoData(**cargo_data)
-                                if cargo.is_valid() and not any(c.cargo_type == cargo.cargo_type and 
-                                                            c.quantity == cargo.quantity for c in cargoes):
-                                    cargoes.append(cargo)
-                                else:
-                                    logger.debug(f"Invalid or duplicate cargo from AI: {cargo_data}")
-                            except Exception as e:
-                                logger.error(f"Failed to process AI cargo: {str(e)}")
+                        # Process cargoes from AI, but only if we don't have any from regex
+                        if len(regex_cargoes) == 0:
+                            for cargo_data in ai_results.get('cargoes', []):
+                                try:
+                                    cargo = CargoData(**cargo_data)
+                                    # Make sure this isn't actually a vessel being misclassified
+                                    cargo_name = self._normalize_vessel_name(cargo.cargo_type)
+                                    if cargo_name not in vessel_names and cargo.is_valid():
+                                        cargoes.append(cargo)
+                                    else:
+                                        logger.debug(f"Skipping invalid or duplicate cargo from AI: {cargo_data}")
+                                except Exception as e:
+                                    logger.error(f"Failed to process AI cargo: {str(e)}")
+                        else:
+                            # Use regex cargoes if we have them
+                            cargoes = regex_cargoes
                 except Exception as e:
                     logger.warning(f"AI parsing failed (continuing with regex results): {str(e)}")
+                    cargoes = regex_cargoes
+            else:
+                # Use regex cargoes if we found enough data with regex
+                cargoes = regex_cargoes
 
             # Store results in database with owner ID
             logger.info(f"Storing {len(vessels)} vessels and {len(cargoes)} cargoes for user_id {user_id}")
-            self._store_results(cargoes, vessels, user_id)
+            
+            # Store vessels
+            for vessel in vessels:
+                db_vessel = Vessel(
+                    name=vessel.name,
+                    dwt=vessel.dwt,
+                    position=vessel.position,
+                    eta=vessel.eta,
+                    open_date=vessel.open_date,
+                    vessel_type=vessel.vessel_type,
+                    description=vessel.description,
+                    owner_id=user_id
+                )
+                self.db.add(db_vessel)
+                
+            # Store cargoes
+            for cargo in cargoes:
+                db_cargo = Cargo(
+                    cargo_type=cargo.cargo_type,
+                    quantity=cargo.quantity,
+                    load_port=cargo.load_port,
+                    discharge_port=cargo.discharge_port,
+                    laycan_start=cargo.laycan_start,
+                    laycan_end=cargo.laycan_end,
+                    rate=cargo.rate,
+                    description=cargo.description,
+                    owner_id=user_id
+                )
+                self.db.add(db_cargo)
+            
+            # Create auctions for vessels with ETAs
+            from .auction_service import AuctionService
+            auction_service = AuctionService(self.db)
+            
+            # Try to create auctions for any new vessels with ETAs
+            newly_created_vessel_ids = []
+            for vessel in vessels:
+                if vessel.eta:
+                    # Get the ID of the newly created vessel
+                    db_vessel = self.db.query(Vessel).filter(
+                        Vessel.name == vessel.name,
+                        Vessel.owner_id == user_id
+                    ).first()
+                    
+                    if db_vessel and db_vessel.id not in newly_created_vessel_ids:
+                        newly_created_vessel_ids.append(db_vessel.id)
+                        auction_service.create_auction_for_vessel(db_vessel.id, user_id)
+            
+            self.db.commit()
             
             # Mark email as processed if we have message_id
             if isinstance(email_data, dict) and email_data.get('message_id'):
@@ -267,51 +338,26 @@ class EmailParser:
             self.db.rollback()
             return [], []
 
-    def _store_results(self, cargoes: List[CargoData], vessels: List[VesselData], user_id: Optional[int] = None):
-        """Store parsed results in database and create auctions for vessels with ETAs"""
-        try:
-            # Store cargoes
-            for cargo in cargoes:
-                db_cargo = Cargo(
-                    cargo_type=cargo.cargo_type,
-                    quantity=cargo.quantity,
-                    load_port=cargo.load_port,
-                    discharge_port=cargo.discharge_port,
-                    laycan_start=cargo.laycan_start,
-                    laycan_end=cargo.laycan_end,
-                    rate=cargo.rate,
-                    description=cargo.description,
-                    owner_id=user_id
-                )
-                self.db.add(db_cargo)
-            
-            from .auction_service import AuctionService
-            auction_service = AuctionService(self.db)
-            
-            # Store vessels and create auctions if they have ETAs
-            for vessel in vessels:
-                db_vessel = Vessel(
-                    name=vessel.name,
-                    dwt=vessel.dwt,
-                    position=vessel.position,
-                    eta=vessel.eta,
-                    open_date=vessel.open_date,
-                    vessel_type=vessel.vessel_type,
-                    description=vessel.description,
-                    owner_id=user_id
-                )
-                self.db.add(db_vessel)
-                self.db.flush()  # Get ID without committing
-                
-                # If vessel has ETA, create auction
-                if vessel.eta:
-                    auction_service.create_auction_for_vessel(db_vessel.id, user_id)
-                    
-            self.db.commit()
-        except Exception as e:
-            logger.error(f"Database storage failed: {str(e)}")
-            self.db.rollback()
-            raise
+    def _normalize_vessel_name(self, name: str) -> str:
+        """Normalize vessel name to avoid duplicates"""
+        if not name:
+            return ""
+        
+        # Convert to uppercase
+        name = name.upper()
+        
+        # Remove common prefixes like "MV", "M/V", etc.
+        prefixes = ["MV ", "M/V ", "MT ", "M/T ", "SS ", "S/S "]
+        for prefix in prefixes:
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+                break
+        
+        # Remove extra whitespace
+        name = " ".join(name.split())
+        
+        return name
+
 
     def has_cargo_indicators(self, text: str) -> bool:
         """Check if text has strong cargo indicators"""

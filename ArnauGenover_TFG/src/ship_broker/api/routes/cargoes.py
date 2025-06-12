@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Dict
 from datetime import datetime
 import logging
-from sqlalchemy import or_  # Add this import
+from sqlalchemy import or_, and_  # Add both imports
 
 from ...core.database import Cargo, Vessel
 from ...core.schemas import CargoCreate, CargoResponse
@@ -132,17 +132,28 @@ async def get_matching_vessels(
                 detail="Authentication required"
             )
             
-        # Get the cargo and verify ownership
+        # Get the cargo and verify ownership or system access
         cargo = db.query(Cargo).filter(
-            Cargo.id == cargo_id,
-            Cargo.owner_id == current_user.id
+            and_(
+                Cargo.id == cargo_id,
+                or_(
+                    Cargo.owner_id == current_user.id,
+                    Cargo.owner_id == None
+                )
+            )
         ).first()
         
         if not cargo:
             raise HTTPException(status_code=404, detail="Cargo not found")
 
-        # Get user's vessels from the database
-        db_vessels = db.query(Vessel).filter(Vessel.owner_id == current_user.id).all()
+        # Get user's vessels and system vessels from the database
+        db_vessels = db.query(Vessel).filter(
+            or_(
+                Vessel.owner_id == current_user.id,
+                Vessel.owner_id == None
+            )
+        ).all()
+        
         if not db_vessels:
             return []
         
@@ -151,7 +162,7 @@ async def get_matching_vessels(
         
         matching_vessels = []
         
-        # First, process the user's database vessels
+        # First, process the database vessels
         for vessel in db_vessels:
             # Calculate match score based on vessel properties
             score = 0.0
@@ -161,13 +172,13 @@ async def get_matching_vessels(
             vessel_type = vessel.vessel_type.lower() if vessel.vessel_type else ""
             cargo_type = cargo.cargo_type.lower()
             
-            if ('bulk' in vessel_type and any(t in cargo_type for t in ['coal', 'ore', 'clinker'])):
+            if ('bulk' in vessel_type and any(t in cargo_type for t in ['coal', 'ore', 'clinker', 'fertilizer'])):
                 score += 0.2
                 reason.append("Vessel type matches cargo")
             elif ('tanker' in vessel_type and 'oil' in cargo_type):
                 score += 0.2
                 reason.append("Tanker suitable for liquid cargo")
-            elif any(t in vessel_type for t in ['cargo', 'general']):
+            elif any(t in vessel_type for t in ['cargo', 'general', 'supramax', 'ultramax']):
                 score += 0.15
                 reason.append("General cargo vessel")
             
@@ -209,7 +220,25 @@ async def get_matching_vessels(
                     except Exception as e:
                         logger.warning(f"Error calculating distance: {str(e)}")
             
-            # Temporal matching (20% of score) - not explicitly calculated in this function
+            # If position names match (direct string comparison)
+            if vessel.position and cargo.load_port and vessel.position.upper() in cargo.load_port.upper():
+                score += 0.3
+                reason.append(f"Currently in loading port area")
+            
+            # Temporal matching (20% of score)
+            if vessel.eta and cargo.laycan_start:
+                try:
+                    # Check if vessel will arrive before or during laycan
+                    if vessel.eta <= cargo.laycan_end:
+                        days_diff = abs((vessel.eta - cargo.laycan_start).days)
+                        if days_diff <= 3:
+                            score += 0.2
+                            reason.append(f"Vessel arriving within 3 days of laycan")
+                        elif days_diff <= 7:
+                            score += 0.1
+                            reason.append(f"Vessel arriving within a week of laycan")
+                except Exception as e:
+                    logger.warning(f"Error calculating temporal match: {str(e)}")
             
             if score >= 0.3:  # Only include vessels with reasonable match score
                 matching_vessels.append({
@@ -220,7 +249,7 @@ async def get_matching_vessels(
                         "position": vessel.position or "Unknown",
                         "dwt": vessel.dwt or 0,
                         "distance_to_load": f"{distance:.0f} nm" if distance else "Unknown",
-                        "source": "user_database"
+                        "source": "user_database" if vessel.owner_id else "system"
                     },
                     "score": score,
                     "reason": "; ".join(reason)
@@ -250,8 +279,13 @@ async def get_cargo(
         )
         
     cargo = db.query(Cargo).filter(
-        Cargo.id == cargo_id,
-        Cargo.owner_id == current_user.id
+        and_(
+            Cargo.id == cargo_id,
+            or_(
+                Cargo.owner_id == current_user.id,
+                Cargo.owner_id == None
+            )
+        )
     ).first()
     
     if cargo is None:

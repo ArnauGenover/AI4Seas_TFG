@@ -23,13 +23,15 @@ class VesselTracker:
         self.last_update = datetime.now()
         self._running = False
 
+
+
     async def start_tracking(self):
-        """Start vessel tracking"""
+        """Start vessel tracking with improved error handling"""
         if self._running:
             return
                 
         self._running = True
-        max_retries = 3  # Limit retries when the service is unavailable
+        max_retries = 5  # Increased from 3
         retry_count = 0
         
         while self._running:
@@ -39,24 +41,31 @@ class VesselTracker:
                 retry_count = 0
             except Exception as e:
                 retry_count += 1
+                wait_time = min(60, 2 ** retry_count)  # Cap at 60 seconds max
+                
                 if retry_count >= max_retries:
-                    logger.error(f"AIS stream connection failed after {max_retries} attempts. Stopping retries.")
-                    self._running = False
-                    return
-                    
-                logger.error(f"AIS stream connection error: {str(e)}")
-                # Exponential backoff with a cap
-                wait_time = min(30, 2 ** retry_count)
+                    logger.error(f"AIS stream connection failed after {max_retries} attempts. Will try again in 5 minutes.")
+                    # Instead of stopping, we'll keep trying but less frequently
+                    wait_time = 300  # 5 minutes
+                    retry_count = 0  # Reset for next batch
+                
+                logger.warning(f"AIS stream connection error: {str(e)}")
                 logger.info(f"Waiting {wait_time} seconds before reconnecting...")
+                
+                # If service is down, try to use mock data
+                if "HTTP 503" in str(e) and retry_count >= 2:
+                    logger.info("Using mock vessel data as fallback while service is unavailable")
+                    self._update_mock_data()
+                    
                 await asyncio.sleep(wait_time)
-
         
     async def stop_tracking(self):
         """Stop vessel tracking"""
         self._running = False
-        
+
+
     async def connect_ais_stream(self):
-        """Connect to AISStream WebSocket"""
+        """Connect to AISStream WebSocket with improved error handling"""
         if not self.api_key:
             logger.error("No API key found in environment variables")
             return
@@ -64,7 +73,8 @@ class VesselTracker:
         url = "wss://stream.aisstream.io/v0/stream"
         
         try:
-            async with websockets.connect(url) as websocket:
+            # Add connection timeout
+            async with websockets.connect(url, ping_timeout=30, close_timeout=30) as websocket:
                 logger.info("Connected to AISStream")
                 
                 subscribe_message = {
@@ -85,23 +95,34 @@ class VesselTracker:
                         await self._process_ais_message(message_data)
                     except asyncio.TimeoutError:
                         try:
+                            # Send ping to keep connection alive
                             pong = await websocket.ping()
                             await asyncio.wait_for(pong, timeout=10)
+                            logger.debug("Ping successful")
                         except Exception as e:
                             logger.error(f"Ping failed: {str(e)}")
                             break
                     except json.JSONDecodeError as e:
                         logger.error(f"Failed to decode message: {str(e)}")
                         continue
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("Connection closed, will attempt to reconnect")
+                        break
                     except Exception as e:
                         if "no close frame received or sent" in str(e):
                             break
                         logger.error(f"Error processing message: {str(e)}")
                         continue
                         
-        except Exception as e:
-            logger.error(f"WebSocket connection error: {str(e)}")
+        except websockets.exceptions.WebSocketException as e:
+            # More detailed error message
+            logger.error(f"WebSocket connection error ({url}): {str(e)}")
+            
+            # If we got a 503, add more specific information
+            if "HTTP 503" in str(e):
+                logger.error("AISStream service is currently unavailable (HTTP 503). This usually indicates temporary server maintenance or overload.")
             raise
+
 
     async def _process_ais_message(self, message: Dict):
         """Process incoming AIS message"""
